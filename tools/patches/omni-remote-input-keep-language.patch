@@ -1,0 +1,93 @@
+diff --git a/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift b/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift
+index 980be6c..a40773e 100644
+--- a/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift
++++ b/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift
+@@ -30,6 +30,14 @@ nonisolated enum RemoteInputComposePrompt {
+     /// A mixed transcript needs at least two Han characters and four Latin letters.
+     /// Below that, a single initial or symbol is too little evidence for a retry.
+     /// Count loss, not language dominance: a short Chinese span inside English matters.
++    /// The model follows a line next to the transcript more than one at the top of the prompt.
++    static func withSection(_ section: String, beforeTranscriptIn prompt: String) -> String {
++        guard let transcript = prompt.range(of: EnhancementPromptResolver.rawTranscriptionTemplateVariable),
++              let boundary = prompt.range(of: "\n\n", options: .backwards, range: prompt.startIndex..<transcript.lowerBound)
++        else { return prompt + "\n\n" + section }
++        return prompt.replacingCharacters(in: boundary, with: "\n\n" + section + "\n\n")
++    }
++
+     static func losesMixedDictationContent(_ output: String, rawText: String) -> Bool {
+         func counts(_ text: String) -> (han: Int, latinLetters: Int, latinWords: Int) {
+             let han = text.unicodeScalars.filter { scalar in
+@@ -225,7 +233,22 @@ nonisolated enum RemoteInputComposePrompt {
+         guard let initialPrompt = instruction(for: options, rawTranscription: rawTranscription) else {
+             throw RemoteInputError(message: "This operation has no compose prompt.")
+         }
+-        let first = try await generate(initialPrompt).trimmingCharacters(in: .whitespacesAndNewlines)
++        var first = try await generate(initialPrompt).trimmingCharacters(in: .whitespacesAndNewlines)
++        if options.mode == .dictate, EnhancementLanguageGuard.languageFlipped(input: rawTranscription, output: first) {
++            let kept = try await EnhancementLanguageGuard.keepingInputLanguage(
++                input: rawTranscription,
++                output: first,
++                retry: {
++                    try await generate(withSection(
++                        EnhancementLanguageGuard.retryInstruction(for: rawTranscription),
++                        beforeTranscriptIn: initialPrompt
++                    )).trimmingCharacters(in: .whitespacesAndNewlines)
++                },
++                log: { VoxtLog.warning("Remote input dictate: \($0)") }
++            )
++            if kept == rawTranscription { return rawTranscription }
++            first = kept
++        }
+         if options.mode == .dictate, leaksContext(first, rawTranscription: rawTranscription, options: options) {
+             VoxtLog.warning("Remote input dictate output repeated the cursor context; retrying once.")
+             guard let retryPrompt = instruction(for: options, rawTranscription: rawTranscription, retryingContextLeak: true) else {
+diff --git a/Voxt/VoxtTests/RemoteInputComposePromptTests.swift b/Voxt/VoxtTests/RemoteInputComposePromptTests.swift
+index b3b9e44..560307f 100644
+--- a/Voxt/VoxtTests/RemoteInputComposePromptTests.swift
++++ b/Voxt/VoxtTests/RemoteInputComposePromptTests.swift
+@@ -92,6 +92,45 @@ final class RemoteInputComposePromptTests: XCTestCase {
+         XCTAssertEqual(calls, 1)
+     }
+ 
++    func testChineseDictationAnsweredInEnglishIsRetriedInChinese() async throws {
++        let raw = "嗯明天下午三点我们在三楼会议室开会 讨论下个季度的发布计划 大家提前准备好材料"
++        var prompts: [String] = []
++        let result = try await RemoteInputComposePrompt.compose(rawTranscription: raw, options: options(.dictate)) { prompt in
++            prompts.append(prompt)
++            return prompts.count == 1
++                ? "We will meet tomorrow at 3 PM in the third floor meeting room to discuss next quarter's release plan."
++                : "明天下午三点我们在三楼会议室开会，讨论下个季度的发布计划，大家提前准备好材料。"
++        }
++        XCTAssertEqual(result, "明天下午三点我们在三楼会议室开会，讨论下个季度的发布计划，大家提前准备好材料。")
++        XCTAssertEqual(prompts.count, 2)
++        let retry = try XCTUnwrap(prompts.last)
++        let note = try XCTUnwrap(retry.range(of: EnhancementLanguageGuard.retryInstruction(for: raw)))
++        let transcript = try XCTUnwrap(retry.range(of: EnhancementPromptResolver.rawTranscriptionTemplateVariable))
++        XCTAssertLessThan(note.lowerBound, transcript.lowerBound, "the language line sits before the transcript")
++    }
++
++    func testChineseDictationStillInEnglishAfterRetryReturnsTheTranscript() async throws {
++        let raw = "嗯明天下午三点我们在三楼会议室开会 讨论下个季度的发布计划 大家提前准备好材料"
++        var calls = 0
++        let result = try await RemoteInputComposePrompt.compose(rawTranscription: raw, options: options(.dictate)) { _ in
++            calls += 1
++            return "We will meet tomorrow at 3 PM in the third floor meeting room to discuss next quarter's release plan."
++        }
++        XCTAssertEqual(result, raw)
++        XCTAssertEqual(calls, 2)
++    }
++
++    func testTranslationIntoAnotherScriptIsNotRetried() async throws {
++        let raw = "明天下午三点我们在三楼会议室开会，讨论下个季度的发布计划。"
++        var calls = 0
++        let result = try await RemoteInputComposePrompt.compose(rawTranscription: raw, options: options(.translate, targetLanguage: "en")) { _ in
++            calls += 1
++            return "We will meet at 3 PM tomorrow in the third floor meeting room to discuss next quarter's release plan."
++        }
++        XCTAssertEqual(result, "We will meet at 3 PM tomorrow in the third floor meeting room to discuss next quarter's release plan.")
++        XCTAssertEqual(calls, 1)
++    }
++
+     private func options(
+         _ mode: RemoteInputComposeMode,
+         targetLanguage: String? = nil,

@@ -1,0 +1,10 @@
+Voxt Mobile
+
+The bundled Japanese, Zhuyin and pinyin input components retain their
+upstream licenses and notices in ios/JapaneseInput, ios/ZhuyinInput,
+ios/PinyinInput and ios/McBopomofoEngine (McBopomofo, MIT). The pinyin
+dictionary is derived from rime-wanxiang (https://github.com/amzxyz/rime-wanxiang,
+CC-BY-4.0), modified; its notice is in ios/PinyinInput/Sources/PinyinInput/Resources/Notices.
+The Mac integration patch applies to Voxt in sglang-omni; its upstream
+Apache-2.0 license remains in the downloaded checkout.
+Tailcat and other Go dependencies retain the licenses in their modules.

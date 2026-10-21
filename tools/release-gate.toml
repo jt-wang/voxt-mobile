@@ -1,0 +1,14 @@
+# Release gate config (tools/release-gate.py).
+#
+# [[prebuilt]]: a third-party framework that ships as a prebuilt binary. Its build machine's paths are
+# allowed only inside that framework and only under the listed prefixes; this Mac's paths still fail
+# everywhere. Each entry records where the binary comes from; release notes repeat it.
+
+[[prebuilt]]
+framework = "llama.framework"
+project = "llama.cpp, via mattt/llama.swift 2.10549.0 (716419d4d7aa542fce301e809cde7234c68ddbc6), a Voxt package"
+version = "b10549"
+url = "https://github.com/ggml-org/llama.cpp/releases/download/b10549/llama-b10549-xcframework.zip"
+# The SwiftPM binary-target checksum (SHA-256 of the zip), from llama.swift's Package.swift.
+sha256 = "636709d4a7b49ac7f2ed6dc8a4de3f278c257cac7248fe40d6a513f671e4bff4"
+allow = ["/Users/runner/"]
