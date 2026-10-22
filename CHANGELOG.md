@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.2
+
+Source update: Voxt quits promptly after phone dictation, and the apps show their real version.
+
+- **Quitting Voxt no longer waits on the input device.** If only the phone had dictated through Voxt, quitting opened the Mac's input device, and a slow device could hold the quit for minutes. Fixed in the Mac patches.
+- **The apps report 0.1.2.** The v0.1.1 iPhone app and Voxt Connector still showed 0.1.0 in About.
+- **The release gate checks each app's version against the release tag** (`tools/release-gate.py check --version`), so a build with an old version number is refused.
+
 ## v0.1.1
 
 Source update: the phone follows the Mac's capabilities, builds carry no personal identity by default, and two Mac fixes.

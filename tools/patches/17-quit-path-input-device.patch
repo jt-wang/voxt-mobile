@@ -1,0 +1,41 @@
+diff --git a/Voxt/Voxt/Transcription/MLXTranscriber.swift b/Voxt/Voxt/Transcription/MLXTranscriber.swift
+index 4ec6c76ca96ab53bbf69c862c841f81530b63b84..686a33516c331996081798a7ec4b844b9d12df75 100644
+--- a/Voxt/Voxt/Transcription/MLXTranscriber.swift
++++ b/Voxt/Voxt/Transcription/MLXTranscriber.swift
+@@ -318,8 +318,10 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+         let correctionPassTask = correctionPasses.currentTask
+ 
+         sessionRevision += 1
+-        stopAudioEngine()
+-        audioEngine.inputNode.removeTap(onBus: 0)
++        if hasConfiguredCaptureGraph {
++            stopAudioEngine()
++            audioEngine.inputNode.removeTap(onBus: 0)
++        }
+         isRecording = false
+         isFinalizingTranscription = false
+         cancelActiveTasks()
+diff --git a/Voxt/VoxtTests/MLXTranscriberIdleReleaseTests.swift b/Voxt/VoxtTests/MLXTranscriberIdleReleaseTests.swift
+index 585c4efa6dc556f22fbbc4007c4a58f6ff870fee..d6b5febedd1c27d2fac96d72d201dc88f6fc635b 100644
+--- a/Voxt/VoxtTests/MLXTranscriberIdleReleaseTests.swift
++++ b/Voxt/VoxtTests/MLXTranscriberIdleReleaseTests.swift
+@@ -19,6 +19,19 @@ final class MLXTranscriberIdleReleaseTests: XCTestCase {
+         XCTAssertEqual(engine.inputNodeReads, 0)
+         XCTAssertEqual(engine.resets, 0)
+     }
++
++    /// Quitting Voxt after the Local API transcribed files must not open the input device either.
++    func testShutdownOfATranscriberThatNeverCapturedLeavesTheAudioEngineAlone() async {
++        let engine = AudioEngineAccessRecorder()
++        let transcriber = MLXTranscriber(
++            modelManager: MLXModelManager(modelRepo: MLXModelManager.defaultModelRepo),
++            audioEngine: engine
++        )
++
++        await transcriber.shutdownForApplicationTermination()
++
++        XCTAssertEqual(engine.inputNodeReads, 0)
++    }
+ }
+ 
+ private final class AudioEngineAccessRecorder: AVAudioEngine {

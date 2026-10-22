@@ -39,22 +39,29 @@ def gate(*args):
     return subprocess.run([sys.executable, "-I", str(GATE), *map(str, args)], capture_output=True, text=True, timeout=120)
 
 
-def info(bundle_id, revision=None):
+def info(bundle_id, revision=None, version="1.0.0", upstream=None):
+    """An Info.plist; version is CFBundleShortVersionString (None leaves it out), 1.0.0 like the fixture's v1.0.0 tag."""
     plist = {"CFBundleIdentifier": bundle_id, "CFBundleExecutable": bundle_id.rsplit(".", 1)[-1]}
     if revision is not None:
         plist["VoxtSourceRevision"] = revision
+    if version is not None:
+        plist["CFBundleShortVersionString"] = version
+    if upstream is not None:
+        plist["VoxtUpstreamRevision"] = upstream
     return plistlib.dumps(plist)
 
 
-def make_ipa(path, app_revision, keyboard_revision=None, binary=b"\x00code\x00", symbols=None, extra=None):
-    """Payload/VoxtMobile.app with a keyboard extension; keyboard_revision defaults to the app's."""
+def make_ipa(path, app_revision, keyboard_revision=None, binary=b"\x00code\x00", symbols=None, extra=None,
+             app_version="1.0.0", keyboard_version="same"):
+    """Payload/VoxtMobile.app with a keyboard extension; keyboard_revision and keyboard_version default to the app's."""
     keyboard_revision = app_revision if keyboard_revision is None else keyboard_revision
+    keyboard_version = app_version if keyboard_version == "same" else keyboard_version
     with zipfile.ZipFile(path, "w") as z:
-        z.writestr("Payload/VoxtMobile.app/Info.plist", info("com.example.voxtmobile", app_revision))
+        z.writestr("Payload/VoxtMobile.app/Info.plist", info("com.example.voxtmobile", app_revision, app_version))
         z.writestr("Payload/VoxtMobile.app/VoxtMobile", binary)
         z.writestr("Payload/VoxtMobile.app/Frameworks/Lib.framework/Info.plist", info("com.example.lib"))
         z.writestr("Payload/VoxtMobile.app/PlugIns/VoxtKeyboard.appex/Info.plist",
-                   info("com.example.voxtmobile.keyboard", keyboard_revision))
+                   info("com.example.voxtmobile.keyboard", keyboard_revision, keyboard_version))
         if symbols is not None:
             z.writestr("Symbols/0000.symbols", symbols)
         for name, data in (extra or {}).items():
@@ -326,6 +333,79 @@ class ReleaseTests(Fixture):
                       *self.local_args(), "--ipa", make_ipa(self.tmp / "a.ipa", self.released))
         self.assertPassed(result)
         self.assertEqual(git(self.work, "rev-parse", "v1.0.0+3^{commit}"), self.released)
+
+
+class VersionTests(Fixture):
+    """With --version, each app and extension of ours must carry that version (CFBundleShortVersionString)."""
+
+    def check(self, artifact, *args):
+        return gate("check", artifact, *self.remote_args(), *args)
+
+    def release(self, *args):
+        return gate("release", "--version", "v1.0.0", "--notes", self.tmp / "notes.md",
+                    "--tagger", "Release Bot <release@example.com>", *self.remote_args(), *args)
+
+    def dmg(self, name, *apps):
+        """A DMG with (app name, Info.plist bytes) apps."""
+        folder = self.tmp / f"{name}-src"
+        for app, plist in apps:
+            (folder / app / "Contents").mkdir(parents=True)
+            (folder / app / "Contents/Info.plist").write_bytes(plist)
+        path = self.tmp / f"{name}.dmg"
+        subprocess.run(["hdiutil", "create", "-quiet", "-fs", "HFS+", "-volname", "T", "-srcfolder", folder, path], check=True)
+        return path
+
+    def test_check_blocks_an_app_of_another_version_and_names_both(self):
+        result = self.check(make_ipa(self.tmp / "a.ipa", self.released, app_version="0.9.0"), "--version", "v1.0.0")
+        self.assertBlocked(result, "VoxtMobile.app is version 0.9.0, not 1.0.0")
+
+    def test_check_passes_an_app_of_the_release_version(self):
+        result = self.check(make_ipa(self.tmp / "a.ipa", self.released), "--version", "v1.0.0")
+        self.assertPassed(result)
+        self.assertIn("1.0.0", result.stdout, "the report says which version it checked")
+
+    def test_check_blocks_an_extension_of_another_version(self):
+        ipa = make_ipa(self.tmp / "a.ipa", self.released, keyboard_version="0.9.0")
+        self.assertBlocked(self.check(ipa, "--version", "v1.0.0"), "VoxtKeyboard.appex is version 0.9.0, not 1.0.0")
+
+    def test_check_blocks_an_app_with_no_version(self):
+        ipa = make_ipa(self.tmp / "a.ipa", self.released, app_version=None)
+        self.assertBlocked(self.check(ipa, "--version", "v1.0.0"), "VoxtMobile.app has no CFBundleShortVersionString")
+
+    def test_check_without_version_does_not_compare(self):
+        self.assertPassed(self.check(make_ipa(self.tmp / "a.ipa", self.released, app_version="0.9.0")))
+
+    def test_check_blocks_a_connector_of_another_version_but_not_voxts_own(self):
+        # Voxt Omni Dev is Voxt (VoxtUpstreamRevision) and keeps Voxt's version; the Connector is ours.
+        voxt = ("Voxt Omni Dev.app", info("com.voxt.Voxt.omni.dev", self.released, "1.16.2", upstream="b" * 40))
+        good = self.dmg("good", ("Voxt Connector.app", info("com.example.connector", self.released)), voxt)
+        self.assertPassed(self.check(good, "--version", "v1.0.0"))
+        old = self.dmg("old", ("Voxt Connector.app", info("com.example.connector", self.released, "0.9.0")), voxt)
+        self.assertBlocked(self.check(old, "--version", "v1.0.0"), "Voxt Connector.app is version 0.9.0, not 1.0.0")
+
+    def test_release_blocks_an_app_of_another_version_and_tags_nothing(self):
+        result = self.release("--build", "7", "--ipa", make_ipa(self.tmp / "a.ipa", self.released, app_version="0.9.0"))
+        self.assertBlocked(result, "VoxtMobile.app is version 0.9.0, not 1.0.0")
+        self.assertNotIn("v1.0.0+7", git(self.remote, "tag", "--list") + (git(self.mirror, "tag", "--list") if self.mirror.exists() else ""))
+        self.assertFalse((self.tmp / "notes.md").exists())
+
+    def test_release_passes_an_app_of_the_release_version(self):
+        self.assertPassed(self.release("--build", "7", "--ipa", make_ipa(self.tmp / "a.ipa", self.released)))
+
+    def test_release_build_checks_against_the_release_version(self):
+        signing = self.tmp / "Signing.local.xcconfig"
+        signing.write_text("VOXT_MOBILE_ID_PREFIX = com.example.official\n")
+        env = {**os.environ, "VOXT_RELEASE_TAGGER": "Release Bot <release@example.com>", "VOXT_TEAM_ID": "ABCDE12345",
+               "VOXT_PROFILE_APP": "App Profile", "VOXT_PROFILE_KEYBOARD": "Keyboard Profile", "VOXT_SIGNING_LOCAL": str(signing),
+               "VOXT_DEVELOPER_ID": "Developer ID Application: Example (ABCDE12345)", "VOXT_NOTARY_KEY": "/keys/k.p8",
+               "VOXT_NOTARY_KEY_ID": "TESTKEYID1", "VOXT_NOTARY_ISSUER": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"}
+        result = subprocess.run(["bash", str(BUILD), *map(str, self.remote_args()), "--tag", "v1.0.0", "--ios", "--build", "7",
+                                 "--mac", "--out", str(self.tmp / "out"), "--dry-run"], capture_output=True, text=True, timeout=120, env=env)
+        self.assertPassed(result)
+        checks = [line for line in result.stdout.splitlines() if "release-gate.py check" in line]
+        self.assertEqual(len(checks), 2, result.stdout)
+        for line in checks:
+            self.assertIn("--version v1.0.0", line)
 
 
 class PrebuiltTests(Fixture):

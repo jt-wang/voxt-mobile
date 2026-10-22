@@ -36,6 +36,6 @@ for f in App/Info.plist Keyboard/Info.plist; do
   check "$f version from MARKETING_VERSION" "$(grep -A1 CFBundleShortVersionString "$f" | grep -c '\$(MARKETING_VERSION)')" 1
   check "$f build from CURRENT_PROJECT_VERSION" "$(grep -A1 '<key>CFBundleVersion</key>' "$f" | grep -c '\$(CURRENT_PROJECT_VERSION)')" 1
 done
-check "iPhone version" "$(setting VoxtMobile MARKETING_VERSION)" "${VOXT_EXPECTED_VERSION:-0.1.0}"
-check "Connector version" "$(cd ../mac/VoxtConnector && xcodebuild -project VoxtConnector.xcodeproj -target VoxtConnector -configuration Release -showBuildSettings 2>/dev/null | sed -n 's/^ *MARKETING_VERSION = //p' | head -1)" "${VOXT_EXPECTED_VERSION:-0.1.0}"
+check "iPhone version" "$(setting VoxtMobile MARKETING_VERSION)" "${VOXT_EXPECTED_VERSION:-0.1.2}"
+check "Connector version" "$(cd ../mac/VoxtConnector && xcodebuild -project VoxtConnector.xcodeproj -target VoxtConnector -configuration Release -showBuildSettings 2>/dev/null | sed -n 's/^ *MARKETING_VERSION = //p' | head -1)" "${VOXT_EXPECTED_VERSION:-0.1.2}"
 exit $fail

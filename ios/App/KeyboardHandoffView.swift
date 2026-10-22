@@ -16,8 +16,7 @@ enum KeyboardHandoffCover {
 }
 
 /// Shown when the keyboard had to open Voxt to start the microphone. iOS gives no way
-/// to return automatically (Apple DTS, Jun 2026), so it
-/// shows the one thing to do and how to skip this next time.
+/// to return automatically, so it shows the one thing to do and how to skip this next time.
 struct KeyboardHandoffView: View {
     @Environment(AppModel.self) private var model
 

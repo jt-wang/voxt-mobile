@@ -5,11 +5,13 @@
                          --dir DIR [--branch main]
       Makes DIR a clean checkout of that public commit, or refuses. Prints the commit last.
   release-gate.py check ARTIFACT... (--remote URL [--mirror DIR] | --local REPO --export DIR)
-                         [--branch main] [--require-remote]
+                         [--branch main] [--require-remote] [--version v1.2.3]
       Reads VoxtSourceRevision from every app and extension in each .ipa, .dmg or bundle folder,
       checks that commit, and fails on any absolute path into a home folder or a mounted disk in any file.
+      With --version, every app and extension must also be version 1.2.3 (CFBundleShortVersionString),
+      except a Voxt build (one with VoxtUpstreamRevision), which keeps Voxt's own version.
   release-gate.py release --version v1.2.3 [--build N --ipa IPA] [--dmg DMG] --notes FILE --tagger "Name <email>" (mode)
-      Runs the same check, then makes an annotated tag v1.2.3+N (v1.2.3+mac without an IPA) on the commit
+      Runs the same check against that version, then makes an annotated tag v1.2.3+N (v1.2.3+mac without an IPA) on the commit
       in the public repo (the mirror, or REPO in local mode) and writes a release notes draft. Pushes nothing.
 
 Remote mode fetches the public repo into a bare mirror (default build/release-source/public.git)
@@ -35,6 +37,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 KEY = "VoxtSourceRevision"
+UPSTREAM_KEY = "VoxtUpstreamRevision"  # set on Voxt builds (tools/omni-dev.sh); they carry Voxt's version, not ours
+VERSION = re.compile(r"v(\d+\.\d+\.\d+)")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 LOCAL_PATH = re.compile(rb"/(?:Users|Volumes)/[^\x00\n\r\"']*")
 CONFIG = Path(__file__).resolve().parent / "release-gate.toml"
@@ -214,12 +218,14 @@ def is_bundle_info(name):
     return owner if owner.endswith((".app", ".appex")) else None
 
 
-def inspect(public, artifacts, require_remote=False, prebuilt=None):
-    """Checks the artifacts against the public commits. Returns (commit, report lines, prebuilt entries used);
-    refuses on any problem."""
+def inspect(public, artifacts, require_remote=False, prebuilt=None, version=None):
+    """Checks the artifacts against the public commits, and with version (v1.2.3) each app's version.
+    Returns (commit, report lines, prebuilt entries used); refuses on any problem."""
     prebuilt = prebuilt or {}
     allowed = {}
     skipped = 0
+    expected = release_version(version) if version else None
+    versioned, upstream = [], []
     if require_remote and public.local:
         raise Refused("--require-remote: this upload needs the commit on the public remote, not local mode")
     problems, revisions = [], {}
@@ -230,7 +236,18 @@ def inspect(public, artifacts, require_remote=False, prebuilt=None):
             owner = None if framework_of(name) else is_bundle_info(name)
             if owner:
                 found = True
-                revision = plistlib.loads(data).get(KEY, "")
+                plist = plistlib.loads(data)
+                revision = plist.get(KEY, "")
+                if expected and plist.get(UPSTREAM_KEY):
+                    upstream.append(f"{owner} {plist.get('CFBundleShortVersionString', '?')}")
+                elif expected:
+                    shown = plist.get("CFBundleShortVersionString", "")
+                    if not shown:
+                        problems.append(f"{Path(artifact).name}: {owner} has no CFBundleShortVersionString")
+                    elif shown != expected:
+                        problems.append(f"{Path(artifact).name}: {owner} is version {shown}, not {expected} ({version})")
+                    else:
+                        versioned.append(owner)
                 if not revision:
                     problems.append(f"{Path(artifact).name}: {owner} has no {KEY}")
                 elif not COMMIT.fullmatch(revision):
@@ -267,6 +284,9 @@ def inspect(public, artifacts, require_remote=False, prebuilt=None):
     mode = "matches the checked source-export tree" if public.local else f"is on the public {public.branch}"
     names = ", ".join(Path(a).name for a in artifacts)
     lines = [f"release-gate: ok, {commit} {mode}", f"checked: {names}: every app and extension names this commit; no local paths"]
+    if expected:
+        lines.append(f"version: {', '.join(versioned)} at {expected}"
+                     + (f"; {', '.join(upstream)} is Voxt's own version ({UPSTREAM_KEY})" if upstream else ""))
     if skipped:
         lines.append(f"skipped: {skipped} Symbols/*.symbols at the IPA root (debug data for Apple's crash reports, never installed on a device)")
     used = [prebuilt[name] for name in sorted(allowed)]
@@ -277,14 +297,23 @@ def inspect(public, artifacts, require_remote=False, prebuilt=None):
     return commit, lines, used
 
 
+def release_version(version):
+    """v1.2.3 -> 1.2.3, the CFBundleShortVersionString every app of the release shows."""
+    match = VERSION.fullmatch(version or "")
+    if not match:
+        raise Refused(f"--version must look like v1.2.3, got {version!r}")
+    return match[1]
+
+
 def check(args):
-    inspect(Public(args), args.artifacts, args.require_remote, load_prebuilt(args.config))
+    if args.version:
+        release_version(args.version)
+    inspect(Public(args), args.artifacts, args.require_remote, load_prebuilt(args.config), args.version)
 
 
 def release(args):
     """After the check passes: an annotated tag on the public commit and a release notes draft. Pushes nothing."""
-    if not re.fullmatch(r"v\d+\.\d+\.\d+", args.version):
-        raise Refused(f"--version must look like v1.2.3, got {args.version!r}")
+    release_version(args.version)
     tagger = re.fullmatch(r"(.+?) <([^<>@\s]+@[^<>\s]+)>", args.tagger or "")
     if not tagger:
         raise Refused('--tagger "Name <email>" is required; the tag shows it publicly')
@@ -294,7 +323,7 @@ def release(args):
     if args.ipa and not args.build:
         raise Refused("--ipa needs --build N, the iOS build number")
     public = Public(args)
-    commit, lines, used = inspect(public, artifacts, args.require_remote, load_prebuilt(args.config))
+    commit, lines, used = inspect(public, artifacts, args.require_remote, load_prebuilt(args.config), args.version)
     tag = f"{args.version}+{args.build}" if args.ipa else f"{args.version}+mac"
     if git("rev-parse", "--verify", "-q", f"refs/tags/{tag}", cwd=public.repo, check=False).returncode == 0:
         raise Refused(f"tag {tag} already exists in {public.repo}")
@@ -354,6 +383,7 @@ def main():
     commands.choices["source"].add_argument("--dir", required=True)
     commands.choices["check"].add_argument("artifacts", nargs="+")
     commands.choices["check"].add_argument("--require-remote", action="store_true")
+    commands.choices["check"].add_argument("--version", help="v1.2.3: every app and extension must be version 1.2.3")
     command = commands.choices["release"]
     command.add_argument("--version", required=True, help="v1.2.3; the tag is v1.2.3+BUILD, or v1.2.3+mac without an IPA")
     command.add_argument("--build", help="iOS build number")

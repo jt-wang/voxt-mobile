@@ -5,6 +5,7 @@
 #   tools/release-build.sh --local REPO --export DIR --rev SHA        (before the first push: REPO holds
 #                                                                      source-export's public commits)
 #   then: [--version v1.2.3] [--ios --build N] [--mac [--mac-app APP]...] [--out DIR] [--dry-run]
+# Each check also requires every app of ours to be version --version (v1.2.3 -> 1.2.3).
 # Last, release-gate.py release tags the public commit v1.2.3+N (or +mac) and drafts release notes;
 # --version defaults to --tag. VOXT_RELEASE_TAGGER="Name <email>" names the tagger (it is public).
 # iOS (default) signs for App Store Connect: VOXT_TEAM_ID, VOXT_PROFILE_APP, VOXT_PROFILE_KEYBOARD
@@ -118,7 +119,7 @@ EOF
     "OTHER_SWIFT_FLAGS=\$(inherited) $swift_maps" "OTHER_CFLAGS=\$(inherited) $c_maps"
   run xcodebuild -exportArchive -archivePath "$out/VoxtMobile-$build.xcarchive" \
     -exportOptionsPlist "$out/ExportOptions.plist" -exportPath "$out/export-$build"
-  run python3 -I "$here/release-gate.py" check "$out/export-$build/VoxtMobile.ipa" "${check_mode[@]}"
+  run python3 -I "$here/release-gate.py" check "$out/export-$build/VoxtMobile.ipa" --version "$version" "${check_mode[@]}"
 fi
 
 if (( mac )); then
@@ -135,7 +136,7 @@ if (( mac )); then
   run python3 -I "$here/release-mac.py" dmg --identity "$VOXT_DEVELOPER_ID" --volname "Voxt Mobile" \
     --out "$out/VoxtConnector.dmg" "$app" ${mac_apps[@]+"${mac_apps[@]}"}
   run python3 -I "$here/release-mac.py" notarize "$out/VoxtConnector.dmg" --log "$out/notarization.json"
-  run python3 -I "$here/release-gate.py" check "$out/VoxtConnector.dmg" "${check_mode[@]}"
+  run python3 -I "$here/release-gate.py" check "$out/VoxtConnector.dmg" --version "$version" "${check_mode[@]}"
 fi
 release=(--version "$version" --notes "$out/release-notes-$version.md")
 (( ios )) && release+=(--build "$build" --ipa "$out/export-$build/VoxtMobile.ipa")

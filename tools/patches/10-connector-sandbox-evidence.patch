@@ -18,7 +18,7 @@ index 0e002dae54a4956657532f9353b9bb5e7f1f473b..0343214c78d2c72c07d88300b5b01f7f
  - `errors.json` maps a name to the status and `{"error": "…"}` body of one failure.
 diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/README.md b/Voxt/Mobile/docs/evidence/connector-link-sandbox/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..234369afbe200f3978b024ce38bd66e350571327
+index 0000000000000000000000000000000000000000..d60c10393c96083f365e9a12d3a1e5d831337bad
 --- /dev/null
 +++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/README.md
 @@ -0,0 +1,93 @@
@@ -54,7 +54,7 @@ index 0000000000000000000000000000000000000000..234369afbe200f3978b024ce38bd66e3
 +
 +```
 +server sandbox container: com.voxt.Voxt.linkcheck
-+server socket: ~/Library/Containers/com.voxt.Voxt.linkcheck/Data/connector.sock (72 bytes)
++server socket: ~/Library/Containers/com.voxt.Voxt.linkcheck/Data/connector.sock (<n> bytes)
 +server requires connector: com.voxt.VoxtConnector.linkcheck
 +server listening
 +```
@@ -87,7 +87,7 @@ index 0000000000000000000000000000000000000000..234369afbe200f3978b024ce38bd66e3
 +
 +What the results show:
 +
-+- The socket at the top of the container fits the 103-byte limit of a socket path (72 bytes here); Application Support inside the container is 95 bytes for a two-letter user name and too long beyond about ten.
++- The socket at the top of the container fits the 103-byte limit of a socket path: 77 bytes for a seven-letter user name. Application Support inside Voxt's container would take 100 bytes for that name, and is too long for a user name of more than ten letters.
 +- The unsandboxed client, signed by the same team, connected into Voxt's container without a prompt.
 +- The sandbox lets Voxt look up a peer's code only when the peer's executable is somewhere the sandbox may read: the client in `/Applications` passes (lookup 0); the same client elsewhere is refused (lookup 100001, EPERM), and the Connector then uses manual entry.
 +- Before the on-disk check was added, the bundle with a file added after signing was approved by the running-code check alone. With `SecStaticCodeCheckValidity` (strict) against the same requirement it is refused.

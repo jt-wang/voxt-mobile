@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-const knownPrivate = "privkey:40ab1b58e9076c7a4d9d07291f5edf9d1aa017eb949624ba683317f48a640369"
-const knownPublic = "nodekey:50d20b455ecf12bc453f83c2cfdb2a24925d06cf2598dcaa54e91af82ce9f765"
+const knownPrivate = "privkey:e014170e3aad6aaefe4d67667124106901cfd02c007ae10ea6d660a9d2347152"
+const knownPublic = "nodekey:c2d83e8a7301f3cb2ca083dd2c8889842bdd494346f548fa89ca822b41c34c5e"
 
 func TestPublicDerivationMatchesKnownVector(t *testing.T) {
 	got, err := publicFromPrivate(knownPrivate)

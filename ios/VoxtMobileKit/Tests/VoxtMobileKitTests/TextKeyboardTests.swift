@@ -113,7 +113,7 @@ import Testing
         let name = "keyboard-migration.\(UUID())"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
-        // The unversioned default from before 2026-10: exactly these six, never a newer full list.
+        // The unversioned default: exactly these six, never a newer full list.
         let legacy = ["en-QWERTY", "fr-AZERTY", "de-QWERTZ", "es-QWERTY", "ja-flick", "zh-Hant-zhuyin"]
         defaults.set(try JSONSerialization.data(withJSONObject: ["enabled": legacy, "active": TextKeyboardLayoutID.japaneseFlick.rawValue]), forKey: TextKeyboardState.storageKey)
         let migrated = TextKeyboardState.load(from: defaults, preferredLanguages: ["en", "zh-Hant"])

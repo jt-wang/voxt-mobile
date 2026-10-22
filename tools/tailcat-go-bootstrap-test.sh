@@ -19,8 +19,9 @@ export VOXT_TAILCAT_HOST_OUT="$cache/host"
 unset GOTOOLCHAIN
 
 for script in build-tailcat-host.sh build-tailcat-native.sh; do
-  if grep -q 'GOPROXY=' "$root/tools/$script" || grep -q 'build/research/tailcat-http/modcache' "$root/tools/$script"; then
-    echo "$script still overrides the proxy or uses the preseeded research toolchain" >&2
+  # tailcat-go-env.sh owns the proxy and the Go caches; a build script that sets its own would skip the clean cache.
+  if grep -qE '(GOPROXY|GOMODCACHE|GOPATH|GOROOT)=' "$root/tools/$script"; then
+    echo "$script sets the Go proxy or a Go cache of its own" >&2
     exit 1
   fi
 done
@@ -65,8 +66,9 @@ if [[ -z "$toolchain" ]]; then
   exit 1
 fi
 case "$toolchain" in
-  *"/build/research/"*)
-    echo "toolchain resolved from the preseeded research cache" >&2
+  "$cache/modcache/golang.org/toolchain@"*) ;;
+  *)
+    echo "toolchain at '$toolchain' was not downloaded into the clean module cache" >&2
     exit 1
     ;;
 esac

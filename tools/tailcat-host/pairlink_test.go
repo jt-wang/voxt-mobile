@@ -22,7 +22,7 @@ func TestPairLinkCarriesTheMacName(t *testing.T){
 // The phone parses these links with URLComponents, which reads '+' as a plus, not a space
 // (a Mac name would show as "…'s+Mac+mini"). Spaces must go out as %20 and '+' as %2B.
 // testdata/pair-links.json is what the iPhone kit's tests parse; this test keeps it current.
-var pairLinkNames=[]string{"Sam's Mac mini","C++ Mac","王的 Mac"}
+var pairLinkNames=[]string{"Sam's Mac mini","C++ Mac","李的 Mac"}
 
 func TestPairLinkEncodesNamesForThePhone(t *testing.T){
  var links []map[string]string

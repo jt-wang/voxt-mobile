@@ -1,12 +1,12 @@
 diff --git a/Voxt/Mobile/docs/evidence/loopback-e2e/README.md b/Voxt/Mobile/docs/evidence/loopback-e2e/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..add8b788095b5acf9855d18ad8ec1414db84cbbb
+index 0000000000000000000000000000000000000000..da364c39ac311baf3073f12a742e9fe4c5bac93c
 --- /dev/null
 +++ b/Voxt/Mobile/docs/evidence/loopback-e2e/README.md
 @@ -0,0 +1,37 @@
 +# Loopback end-to-end run
 +
-+What this checks: Voxt built from this tree answers every Local API request the iPhone app sends, on 127.0.0.1, with real models, and its answers have the shapes in [`Voxt/Mobile/contract`](../../../contract).
++What this checks: Voxt built from this tree answers every Local API request the iPhone app sends except history sync (`POST /v1/history/sync`), on 127.0.0.1, with real models, and its answers have the shapes in [`Voxt/Mobile/contract`](../../../contract).
 +
 +How it was hosted: the unattended run served the Local API from the XCTest host, through `Voxt/VoxtTests/LocalAPILoopbackServeTests.swift`, which turns the Local API on with the real app delegate and keeps it up. That uses the same router, pipeline, transcription and text models as the app; only the launch path differs, because launching Voxt.app itself (the path in the Voxt Mobile README) asks macOS for Accessibility at startup, and that prompt needs a person to answer it. A run against a launched Voxt.app is added separately once it has been done with someone present.
 +
