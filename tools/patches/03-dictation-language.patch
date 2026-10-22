@@ -1,0 +1,403 @@
+diff --git a/Voxt/Voxt/App/LocalAPIFlow.swift b/Voxt/Voxt/App/LocalAPIFlow.swift
+index beec7ed34fc884cece3e7bcc9e6e57bd98050c45..b19e4f591e8af84180b075544463a3fefd5de8db 100644
+--- a/Voxt/Voxt/App/LocalAPIFlow.swift
++++ b/Voxt/Voxt/App/LocalAPIFlow.swift
+@@ -27,9 +27,9 @@ extension AppDelegate {
+         let pipeline = LocalAPIDictationPipeline(
+             temporaryDirectory: FileManager.default.temporaryDirectory,
+             busyReason: { [weak self] in self?.localAPIBusyReason() },
+-            transcribe: { [weak self] url in
++            transcribe: { [weak self] url, language in
+                 guard let self else { throw CancellationError() }
+-                return try await self.transcribeLocalAPIAudio(at: url)
++                return try await self.transcribeLocalAPIAudio(at: url, language: language)
+             },
+             enhance: { [weak self] text in
+                 guard let self else { return text }
+diff --git a/Voxt/Voxt/App/LocalAPITranscription.swift b/Voxt/Voxt/App/LocalAPITranscription.swift
+index a3bb38db74ce94db63d42d5c5d891554d6a44775..e90d1a832a58f6f93bf4bdb1d1923dd9869cdc45 100644
+--- a/Voxt/Voxt/App/LocalAPITranscription.swift
++++ b/Voxt/Voxt/App/LocalAPITranscription.swift
+@@ -11,7 +11,7 @@ extension AppDelegate {
+         var remoteModel: String?
+     }
+ 
+-    func transcribeLocalAPIAudio(at url: URL) async throws -> String {
++    func transcribeLocalAPIAudio(at url: URL, language: ASRLanguageSelection = .userSettings) async throws -> String {
+         prepareLegacySettingsForSession(outputMode: .transcription)
+         synchronizeRuntimeASRStateForSession(outputMode: .transcription)
+ 
+@@ -31,9 +31,9 @@ extension AppDelegate {
+             }
+             let transcriber = mlxTranscriber ?? MLXTranscriber(modelManager: mlxModelManager)
+             mlxTranscriber = transcriber
+-            text = try await transcriber.transcribeAudioFile(url)
++            text = try await transcriber.transcribeAudioFile(url, languageSelection: language)
+         case .remote:
+-            text = try await remoteASRTranscriber.transcribeMeetingAudioFile(url)
++            text = try await remoteASRTranscriber.transcribeMeetingAudioFile(url, languageSelection: language)
+         case .dictation:
+             throw LocalAPIError(message: AppLocalization.localizedString(
+                 "Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription."
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+index f52b5dc6a68da48e3c6df8a4b6a78a5e6a3d08ec..6dd8751b7291a2c643ea7f45d78649031d06f11f 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+@@ -37,7 +37,7 @@ final class LocalAPIDictationPipeline {
+     let busyReason: () -> String?
+     let isReadableAudio: (URL) -> Bool
+     /// Audio file → normalized transcript, using the engine selected in Voxt.
+-    let transcribe: (URL) async throws -> String
++    let transcribe: (URL, ASRLanguageSelection) async throws -> String
+     /// Transcript → cleaned-up text, using Voxt's transcription enhancement settings.
+     let enhance: (String) async throws -> String
+     /// Applies dictionary corrections to the final text.
+@@ -50,7 +50,7 @@ final class LocalAPIDictationPipeline {
+         temporaryDirectory: URL,
+         busyReason: @escaping () -> String?,
+         isReadableAudio: @escaping (URL) -> Bool = LocalAPIDictationPipeline.isReadableAudioFile,
+-        transcribe: @escaping (URL) async throws -> String,
++        transcribe: @escaping (URL, ASRLanguageSelection) async throws -> String,
+         enhance: @escaping (String) async throws -> String,
+         finalize: @escaping (String) -> LocalAPIFinalText,
+         record: @escaping (LocalAPIDictationOutcome) -> Void
+@@ -94,7 +94,7 @@ final class LocalAPIDictationPipeline {
+         let rawText: String
+         let transcriptionStart = Date()
+         do {
+-            rawText = try await transcribe(audioURL).trimmingCharacters(in: .whitespacesAndNewlines)
++            rawText = try await transcribe(audioURL, request.language).trimmingCharacters(in: .whitespacesAndNewlines)
+         } catch {
+             VoxtLog.warning("Local API transcription failed: \(error.localizedDescription)")
+             return .error(status: 500, error.localizedDescription)
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
+index e2079fc5a1bb211048b2a3dc64c3e45378aaf60a..6a02a3d261e70752ccc5cd2da9f17709f4f3e0ff 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
+@@ -8,6 +8,7 @@ nonisolated struct LocalAPIDictationRequest: Equatable, Sendable {
+     var audio: Data
+     var fileExtension: String
+     var enhance: Bool
++    var language: ASRLanguageSelection = .userSettings
+ }
+ 
+ nonisolated enum LocalAPIRoute: Equatable, Sendable {
+@@ -55,16 +56,31 @@ nonisolated struct LocalAPIRouter: Sendable {
+             guard let fileExtension = Self.audioExtensions[mediaType] else {
+                 return .reject(.error(status: 415, "Send audio/wav or audio/mp4."))
+             }
++            guard let language = Self.languageSelection(request.query["language"]) else {
++                return .reject(.error(status: 400, "Set language to auto or a language name such as English."))
++            }
+             return .dictation(LocalAPIDictationRequest(
+                 audio: request.body,
+                 fileExtension: fileExtension,
+-                enhance: request.query["enhance"] != "0"
++                enhance: request.query["enhance"] != "0",
++                language: language
+             ))
+         default:
+             return .reject(.error(status: 404, "Unknown path."))
+         }
+     }
+ 
++    /// No value keeps the user's language settings; "auto" detects the language; a name such as
++    /// "English" transcribes in that language. nil for a value that is not a language name.
++    static func languageSelection(_ value: String?) -> ASRLanguageSelection? {
++        guard let value else { return .userSettings }
++        let name = value.trimmingCharacters(in: .whitespaces)
++        if name.lowercased() == "auto" { return .request(nil) }
++        guard (1...40).contains(name.count),
++              name.allSatisfy({ $0.isLetter || $0 == " " || $0 == "-" }) else { return nil }
++        return .request(name)
++    }
++
+     private func isAuthorized(_ request: LocalAPIHTTPRequest) -> Bool {
+         guard !token.isEmpty, let header = request.header("authorization"), header.hasPrefix("Bearer ") else {
+             return false
+diff --git a/Voxt/Voxt/Core/Transcription/ASRHintResolver.swift b/Voxt/Voxt/Core/Transcription/ASRHintResolver.swift
+index 2b40d0f8622a01ef2ca93529dfe1378263bb92d7..27bed3050a2a796a1a4d4d9a60165cc46122a2a5 100644
+--- a/Voxt/Voxt/Core/Transcription/ASRHintResolver.swift
++++ b/Voxt/Voxt/Core/Transcription/ASRHintResolver.swift
+@@ -11,6 +11,22 @@ struct ResolvedASRHintPayload {
+     var otherLanguages: [String] = []
+     var multilingualContext: String?
+     var contextualPhrases: [String] = []
++
++    func selectingLanguage(_ selection: ASRLanguageSelection) -> Self {
++        switch selection {
++        case .userSettings:
++            return self
++        case .request(let language):
++            var result = self
++            let trimmed = language?.trimmingCharacters(in: .whitespacesAndNewlines)
++            result.language = trimmed?.isEmpty == false ? trimmed : nil
++            result.languageHints = result.language.map { [$0] } ?? []
++            result.otherLanguages = []
++            result.multilingualContext = nil
++            result.chineseOutputVariant = nil
++            return result
++        }
++    }
+ }
+ 
+ struct ResolvedDictationSettings: Equatable {
+diff --git a/Voxt/Voxt/Core/Transcription/ASRLanguageSelection.swift b/Voxt/Voxt/Core/Transcription/ASRLanguageSelection.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2065b3de59624c4278815227507ef4e62f2c690
+--- /dev/null
++++ b/Voxt/Voxt/Core/Transcription/ASRLanguageSelection.swift
+@@ -0,0 +1,10 @@
++// ASRLanguageSelection.swift
++// Provides the language a single transcription runs in: the user's settings, or one a Local API
++// client names for its request (nil there means detect it).
++
++import Foundation
++
++nonisolated enum ASRLanguageSelection: Equatable, Sendable {
++    case userSettings
++    case request(String?)
++}
+diff --git a/Voxt/Voxt/Meeting/MeetingTranscriberAdapters.swift b/Voxt/Voxt/Meeting/MeetingTranscriberAdapters.swift
+index 360065fc16f77852c260c6c79a807ef9f8663eee..6e99e23e3ffe65849bed5e2890c5b9a5a1b452ab 100644
+--- a/Voxt/Voxt/Meeting/MeetingTranscriberAdapters.swift
++++ b/Voxt/Voxt/Meeting/MeetingTranscriberAdapters.swift
+@@ -35,12 +35,16 @@ extension RemoteASRTranscriber {
+         return MeetingConfiguration(provider: provider, configuration: configuration)
+     }
+ 
+-    func transcribeMeetingAudioFile(_ fileURL: URL) async throws -> String {
++    func transcribeMeetingAudioFile(
++        _ fileURL: URL,
++        languageSelection: ASRLanguageSelection = .userSettings
++    ) async throws -> String {
+         let meetingConfiguration = currentMeetingConfiguration()
+         return try await transcribeDebugAudioFile(
+             fileURL,
+             provider: meetingConfiguration.provider,
+-            configuration: meetingConfiguration.configuration
++            configuration: meetingConfiguration.configuration,
++            languageSelection: languageSelection
+         )
+     }
+ }
+diff --git a/Voxt/Voxt/Transcription/MLXTranscriber.swift b/Voxt/Voxt/Transcription/MLXTranscriber.swift
+index 5ff88bf41c6299ff896048c86e3e8010426195a0..304164e08f46e57a21070caba5006cd90f0fc5ad 100644
+--- a/Voxt/Voxt/Transcription/MLXTranscriber.swift
++++ b/Voxt/Voxt/Transcription/MLXTranscriber.swift
+@@ -1671,12 +1671,13 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+ 
+     private func resolvedInferenceConfiguration(
+         for stage: MLXCorrectionPassKind,
+-        audioDurationSeconds: Double? = nil
++        audioDurationSeconds: Double? = nil,
++        languageSelection: ASRLanguageSelection = .userSettings
+     ) -> ResolvedInferenceConfiguration {
+         MLXInferenceConfiguration.resolve(
+             for: stage,
+             audioDurationSeconds: audioDurationSeconds,
+-            hintPayload: resolvedHintPayload(),
++            hintPayload: resolvedHintPayload().selectingLanguage(languageSelection),
+             tuningSettings: resolvedLocalTuningSettings(),
+             transcriptionPurpose: transcriptionPurpose,
+             userLanguageCodes: UserMainLanguageOption.storedSelection(
+@@ -1898,7 +1899,8 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+ 
+     func transcribeBufferedResult(
+         samples: [Float],
+-        sampleRate: Double
++        sampleRate: Double,
++        languageSelection: ASRLanguageSelection = .userSettings
+     ) async throws -> MLXBufferedTranscriptionResult? {
+         guard !samples.isEmpty else { return nil }
+ 
+@@ -1911,7 +1913,8 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+         let audioDurationSeconds = Double(samples.count) / safeSampleRate(sampleRate)
+         let inferenceConfiguration = resolvedInferenceConfiguration(
+             for: .postStopFinal,
+-            audioDurationSeconds: audioDurationSeconds
++            audioDurationSeconds: audioDurationSeconds,
++            languageSelection: languageSelection
+         )
+         let inferenceResult = try await runStreamingInference(
+             model: model,
+@@ -1936,12 +1939,16 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+         )
+     }
+ 
+-    func transcribeAudioFile(_ fileURL: URL) async throws -> String {
++    func transcribeAudioFile(
++        _ fileURL: URL,
++        languageSelection: ASRLanguageSelection = .userSettings
++    ) async throws -> String {
+         let loaded = try DebugAudioClipIO.loadMonoSamples(from: fileURL)
+-        return try await transcribeBufferedChunk(
++        return try await transcribeBufferedResult(
+             samples: loaded.samples,
+-            sampleRate: loaded.sampleRate
+-        ) ?? ""
++            sampleRate: loaded.sampleRate,
++            languageSelection: languageSelection
++        )?.text ?? ""
+     }
+ 
+     func debugReplayAudioFileWithTrace(
+diff --git a/Voxt/Voxt/Transcription/RemoteASR/RemoteASRTranscriber.swift b/Voxt/Voxt/Transcription/RemoteASR/RemoteASRTranscriber.swift
+index c65860b82ea03a0c8503490f120ebfc950d88c07..af2cf9810516598d5bcffad236474c4366b4cc87 100644
+--- a/Voxt/Voxt/Transcription/RemoteASR/RemoteASRTranscriber.swift
++++ b/Voxt/Voxt/Transcription/RemoteASR/RemoteASRTranscriber.swift
+@@ -655,7 +655,8 @@ class RemoteASRTranscriber: NSObject, ObservableObject, TranscriberProtocol {
+     func transcribeDebugAudioFile(
+         _ fileURL: URL,
+         provider: RemoteASRProvider,
+-        configuration: RemoteProviderConfiguration
++        configuration: RemoteProviderConfiguration,
++        languageSelection: ASRLanguageSelection = .userSettings
+     ) async throws -> String {
+         guard configuration.isConfigured else {
+             throw NSError(
+@@ -665,6 +666,7 @@ class RemoteASRTranscriber: NSObject, ObservableObject, TranscriberProtocol {
+             )
+         }
+         let hintPayload = resolvedHintPayload(for: provider, configuration: configuration)
++            .selectingLanguage(languageSelection)
+         do {
+             return try await transcribeAudioFile(
+                 fileURL: fileURL,
+diff --git a/Voxt/VoxtTests/ASRHintSettingsTests.swift b/Voxt/VoxtTests/ASRHintSettingsTests.swift
+index f110ca5074cf84977ea6337d6114d39b0d4e28be..d58ab59fe560fd928d4fc3169eea921227e31fb9 100644
+--- a/Voxt/VoxtTests/ASRHintSettingsTests.swift
++++ b/Voxt/VoxtTests/ASRHintSettingsTests.swift
+@@ -7,6 +7,35 @@ import MLXAudioSTT
+ 
+ @MainActor
+ final class ASRHintSettingsTests: XCTestCase {
++    // Given an English hint, the native server translated Chinese speech into English.
++    func testLocalAPIAutoDoesNotInheritEnglishMainLanguage() {
++        let macHint = ASRHintResolver.resolve(
++            target: .mlxAudio, settings: ASRHintSettings(),
++            userLanguageCodes: ["en"], mlxModelRepo: "mlx-community/Qwen3-ASR-0.6B-4bit"
++        )
++        XCTAssertNotNil(macHint.language)
++        let automatic = macHint.selectingLanguage(.request(nil))
++        XCTAssertNil(automatic.language)
++        XCTAssertTrue(automatic.languageHints.isEmpty)
++        XCTAssertEqual(macHint.selectingLanguage(.userSettings).language, macHint.language)
++    }
++
++    func testLocalAPIExplicitLanguageOverridesMacAndKeepsVocabulary() {
++        let original = ResolvedASRHintPayload(
++            language: "en", languageHints: ["en"], prompt: "Voxt",
++            otherLanguages: ["English"], multilingualContext: "English",
++            contextualPhrases: ["Voxt"]
++        )
++        let explicit = original.selectingLanguage(.request("Chinese"))
++        XCTAssertEqual(explicit.language, "Chinese")
++        XCTAssertEqual(explicit.languageHints, ["Chinese"])
++        XCTAssertEqual(explicit.contextualPhrases, ["Voxt"])
++        XCTAssertEqual(explicit.prompt, "Voxt")
++        XCTAssertTrue(explicit.otherLanguages.isEmpty)
++        XCTAssertNil(explicit.multilingualContext)
++        XCTAssertNil(original.selectingLanguage(.request("  ")).language)
++    }
++
+     func testLoadSanitizesUnsupportedPromptEditors() {
+         let raw = """
+         {"mlxAudio":{"followsUserMainLanguage":true,"promptTemplate":"  should be removed  "},"openAIWhisper":{"followsUserMainLanguage":false,"promptTemplate":"  Bias {{USER_MAIN_LANGUAGE}}  "}}
+diff --git a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+index 7a04e8e849d77fee1f5e4016ba2674e61219e74d..89bab7b4d70c3cde29343267920f07083e99d491 100644
+--- a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
++++ b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+@@ -8,6 +8,7 @@ import XCTest
+ final class LocalAPIDictationPipelineTests: XCTestCase {
+     private var directory: URL!
+     private var transcribedFiles: [(URL, Data)] = []
++    private var transcribedLanguages: [ASRLanguageSelection] = []
+     private var enhancedInputs: [String] = []
+     private var recorded: [LocalAPIDictationOutcome] = []
+ 
+@@ -16,6 +17,7 @@ final class LocalAPIDictationPipelineTests: XCTestCase {
+             .appendingPathComponent("LocalAPIDictationPipelineTests-\(UUID().uuidString)", isDirectory: true)
+         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+         transcribedFiles = []
++        transcribedLanguages = []
+         enhancedInputs = []
+         recorded = []
+     }
+@@ -35,8 +37,9 @@ final class LocalAPIDictationPipelineTests: XCTestCase {
+             temporaryDirectory: directory,
+             busyReason: { busyReason },
+             isReadableAudio: checksAudioWithAVFoundation ? LocalAPIDictationPipeline.isReadableAudioFile : { _ in true },
+-            transcribe: { [unowned self] url in
++            transcribe: { [unowned self] url, language in
+                 transcribedFiles.append((url, (try? Data(contentsOf: url)) ?? Data()))
++                transcribedLanguages.append(language)
+                 if transcribeDelay != .zero { try await Task.sleep(for: transcribeDelay) }
+                 return try transcript.get()
+             },
+@@ -61,6 +64,15 @@ final class LocalAPIDictationPipelineTests: XCTestCase {
+ 
+     private let request = LocalAPIDictationRequest(audio: Data([9, 8, 7]), fileExtension: "m4a", enhance: true)
+ 
++    func testTranscriptionGetsTheRequestedLanguage() async {
++        let pipeline = makePipeline()
++        var chinese = request
++        chinese.language = .request("Chinese")
++        _ = await pipeline.run(request)
++        _ = await pipeline.run(chinese)
++        XCTAssertEqual(transcribedLanguages, [.userSettings, .request("Chinese")])
++    }
++
+     func testSuccessfulDictationTranscribesEnhancesFinalizesAndRecords() async throws {
+         let pipeline = makePipeline()
+ 
+diff --git a/Voxt/VoxtTests/LocalAPIRouterTests.swift b/Voxt/VoxtTests/LocalAPIRouterTests.swift
+index 1e0196f69d0cfb7bc286d446410667de0c976a15..8b309797f10b5ea2850b199d8029d0abb72bf13c 100644
+--- a/Voxt/VoxtTests/LocalAPIRouterTests.swift
++++ b/Voxt/VoxtTests/LocalAPIRouterTests.swift
+@@ -50,6 +50,23 @@ final class LocalAPIRouterTests: XCTestCase {
+         )
+     }
+ 
++    func testDictationLanguageComesFromTheQuery() {
++        let audio = Data([1])
++        func route(_ query: [String: String]) -> LocalAPIRoute {
++            router.route(request("POST", "/v1/dictations", query: query, contentType: "audio/wav", body: audio))
++        }
++        func dictation(_ language: ASRLanguageSelection) -> LocalAPIRoute {
++            .dictation(LocalAPIDictationRequest(audio: audio, fileExtension: "wav", enhance: true, language: language))
++        }
++        XCTAssertEqual(route([:]), dictation(.userSettings))
++        XCTAssertEqual(route(["language": "auto"]), dictation(.request(nil)))
++        XCTAssertEqual(route(["language": "Chinese"]), dictation(.request("Chinese")))
++        XCTAssertEqual(route(["language": "Simplified Chinese"]), dictation(.request("Simplified Chinese")))
++        for bad in ["", "  ", "en\"; x", String(repeating: "a", count: 41)] {
++            XCTAssertEqual(status(route(["language": bad])), 400, bad)
++        }
++    }
++
+     func testDictationRejectsBadInput() {
+         XCTAssertEqual(status(router.route(request("POST", "/v1/dictations", contentType: "audio/wav"))), 400)
+         XCTAssertEqual(status(router.route(request("POST", "/v1/dictations", contentType: "text/plain", body: Data([1])))), 415)
+diff --git a/Voxt/docs/LocalAPI.md b/Voxt/docs/LocalAPI.md
+index 90266c4c033f41837c50c4fd07631e50a5957668..88331b72a9ff6758df73f582f5de8bb890d2507e 100644
+--- a/Voxt/docs/LocalAPI.md
++++ b/Voxt/docs/LocalAPI.md
+@@ -31,7 +31,7 @@ Every request needs `Authorization: Bearer <token>`. **Regenerate** issues a new
+ | --- | --- |
+ | `GET /v1/health` | `{"ok": true, "app": "Voxt", "version": "…"}` |
+ | `GET /v1/capabilities` | API version, endpoints, accepted audio types, size limit, and whether the selected transcription and text models are ready |
+-| `POST /v1/dictations` | Body: audio bytes. `Content-Type`: `audio/wav`, `audio/x-m4a`, `audio/mp4`, `audio/aac`, `audio/mpeg` or `audio/x-caf`. Add `?enhance=0` to skip the text model. Returns `id`, `text`, `rawText`, `enhanced`, `asrMs`, `enhanceMs` |
++| `POST /v1/dictations` | Body: audio bytes. `Content-Type`: `audio/wav`, `audio/x-m4a`, `audio/mp4`, `audio/aac`, `audio/mpeg` or `audio/x-caf`. Add `?enhance=0` to skip the text model, and `?language=auto` (detect) or `?language=English` (a language name) to override your language settings for this recording. Returns `id`, `text`, `rawText`, `enhanced`, `asrMs`, `enhanceMs` |
+ 
+ `capabilities` example:
+ 
+@@ -52,7 +52,7 @@ Errors return `{"error": "…"}`.
+ 
+ | Status | When |
+ | --- | --- |
+-| 400 | Empty body or audio that cannot be read |
++| 400 | Empty body, audio that cannot be read, or a `language` that is not `auto` or a language name |
+ | 401 | Missing or wrong token |
+ | 404 / 405 | Unknown path or wrong method |
+ | 411 | Chunked request body; send `Content-Length` |

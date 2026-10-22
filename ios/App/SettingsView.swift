@@ -231,12 +231,14 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("historyRetention")
             .accessibilityLabel(VoxtL10n.shared.format("Save history: %@", model.historyRetention.title))
-            Divider()
-            Toggle(VoxtL10n.shared.string("Sync history with Mac"), isOn: Binding(
-                get: { model.historySyncEnabled }, set: { model.setHistorySyncEnabled($0) }))
-                .disabled(model.historyRetention == .off)
-                .accessibilityIdentifier("historySyncToggle")
-            if model.historySyncEnabled {
+            if model.macServes(.historySync) {
+                Divider()
+                Toggle(VoxtL10n.shared.string("Sync history with Mac"), isOn: Binding(
+                    get: { model.historySyncEnabled }, set: { model.setHistorySyncEnabled($0) }))
+                    .disabled(model.historyRetention == .off)
+                    .accessibilityIdentifier("historySyncToggle")
+            }
+            if model.historySyncEnabled && model.macServes(.historySync) {
                 SettingsCaption("Enable history sync in Voxt Settings on your Mac too. Saved text merges between devices. Deleting a record removes it from both; automatic retention only clears this device.")
                 Button(VoxtL10n.shared.string(model.isSyncingHistory ? "Syncing…" : "Sync now")) { Task { await model.syncHistory() } }
                     .disabled(model.isSyncingHistory)
@@ -348,7 +350,7 @@ private struct AdvancedSettingsView: View {
                             if enabled { confirmDeveloperMode = true } else { model.setDeveloperMode(false) }
                         }))
                         .accessibilityIdentifier("developerModeToggle")
-                    if model.developerModeEnabled {
+                    if model.developerModeEnabled && model.macServes(.composePrompts) {
                         Button(VoxtL10n.shared.string("Prompts")) { showsDeveloperPrompts = true }
                             .foregroundStyle(VoxtTheme.Colors.accent)
                             .accessibilityIdentifier("developerPrompts")
@@ -475,7 +477,7 @@ private struct KeyboardLayoutsView: View {
                         .buttonStyle(.borderless)
                     }
                 }
-                let available = TextKeyboardLayoutID.allCases.filter { !state.enabled.contains($0) }
+                let available = TextKeyboardLayoutID.offered.filter { !state.enabled.contains($0) }
                 if !available.isEmpty {
                     Section(VoxtL10n.shared.string("Add keyboard")) {
                         ForEach(available, id: \.self) { layout in

@@ -48,8 +48,8 @@ import Testing
         #expect(config.displayName == nil)
     }
 
-    @Test func directHostsShowTheMachineName() throws {
-        #expect(try ServerConfig(baseURL: #require(URL(string: "https://studio.tail1.ts.net:8900")), token: "t").displayName == "studio")
+    @Test func aHostIsNeverTakenForTheMacsName() throws {
+        #expect(try ServerConfig(baseURL: #require(URL(string: "https://studio.tail1.ts.net:8900")), token: "t").displayName == nil)
         #expect(try ServerConfig(baseURL: #require(URL(string: "http://127.0.0.1:8900")), token: "t").displayName == nil)
     }
 }

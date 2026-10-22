@@ -2,8 +2,8 @@ import AppKit
 import Observation
 import os
 
-/// Timing of window placement; read with `log show --predicate 'subsystem == "com.voxtmobile.connector"'`.
-let windowLog = Logger(subsystem: "com.voxtmobile.connector", category: "window")
+/// Timing of window placement; read with `log show --predicate 'subsystem == "<the Connector's bundle ID>"'`.
+let windowLog = Logger(subsystem: ConnectorIdentity.bundleIdentifier, category: "window")
 
 /// The Dock icon: shown by default so the Settings window is easy to find; when hidden, the
 /// Connector runs from the menu bar only, like an LSUIElement app.

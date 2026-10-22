@@ -8,7 +8,7 @@ public final class DictationChannel: @unchecked Sendable {
     /// teams, so each signer's build has its own (`VOXT_MOBILE_ID_PREFIX`); the build writes
     /// it into both Info.plists as `VoxtAppGroup`.
     public static let appGroup = appGroup(from: Bundle.main.infoDictionary)
-    public static let defaultAppGroup = "group.io.jingtao.voxtmobile.shared"
+    public static let defaultAppGroup = "group.com.voxt.VoxtMobile.shared"
 
     static func appGroup(from info: [String: Any]?) -> String {
         if let group = info?["VoxtAppGroup"] as? String, group.hasPrefix("group."), !group.contains("$(") { return group }
@@ -16,8 +16,11 @@ public final class DictationChannel: @unchecked Sendable {
         if let group = (info?["ALTAppGroups"] as? [String])?.first, group.hasPrefix("group.") { return group }
         return defaultAppGroup
     }
-    public static let commandNotification = "com.voxtmobile.command"
-    public static let stateNotification = "com.voxtmobile.state"
+    /// Darwin notification names are system-wide, so they carry the App Group: two builds
+    /// signed by different teams on one phone then never wake each other.
+    static func notification(_ name: String, appGroup: String) -> String { appGroup + "." + name }
+    public static let commandNotification = notification("command", appGroup: appGroup)
+    public static let stateNotification = notification("state", appGroup: appGroup)
     /// The app writes a heartbeat every second while its audio session is running.
     public static let heartbeatTimeout: TimeInterval = 3
 

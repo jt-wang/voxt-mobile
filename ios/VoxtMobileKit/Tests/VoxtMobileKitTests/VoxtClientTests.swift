@@ -15,6 +15,8 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var composeFailures: [String: [URLError.Code]] = [:]
     /// How many upcoming /v1/health requests of a session fail with cannotConnectToHost.
     nonisolated(unsafe) static var healthFailures: [String: Int] = [:]
+    /// A session's own /v1/capabilities reply; others get the older two-field reply.
+    nonisolated(unsafe) static var capabilities: [String: Stub] = [:]
     static let lock = NSLock()
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -52,7 +54,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         let stub = request.url?.path == "/v1/capabilities"
-            ? Stub(status: 200, body: Data(#"{"transcription":"local","text":"local"}"#.utf8))
+            ? Self.capabilities[id] ?? Stub(status: 200, body: Data(#"{"transcription":"local","text":"local"}"#.utf8))
             : request.url?.path == "/v1/health" && Self.healthySessions.contains(id)
             ? Stub(status: 200, body: Data(#"{"ok":true,"app":"Voxt","version":"fixture"}"#.utf8))
             : Self.stubs[id] ?? Stub(status: 500, body: Data())
@@ -199,7 +201,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
                 let (request, body) = try #require(StubURLProtocol.lastRequest(id: session))
                 if literal && mode == .dictate {
                     #expect(request.url?.path == "/v1/dictations")
-                    #expect(request.url?.query == "enhance=0")
+                    #expect(request.url?.query == "enhance=0&language=auto")
                     #expect(request.value(forHTTPHeaderField: "Content-Type") == "audio/wav")
                     #expect(body == audio)
                 } else {
@@ -268,7 +270,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(result.asrMs == 812)
         let (request, body) = try #require(StubURLProtocol.lastRequest(id: id))
         #expect(request.httpMethod == "POST")
-        #expect(request.url?.absoluteString == "https://mac.tail1.ts.net:8900/v1/dictations")
+        #expect(request.url?.absoluteString == "https://mac.tail1.ts.net:8900/v1/dictations?language=auto")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret-token")
         #expect(request.value(forHTTPHeaderField: "Content-Type") == "audio/wav")
         #expect(body == audio)
@@ -279,7 +281,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         let client = StubURLProtocol.makeClient(id: id, status: 200, json: #"{"id":"d2","text":"hi","rawText":"hi"}"#)
         _ = try await client.dictate(audio: Data([0]), contentType: "audio/wav", enhance: false)
         let (request, _) = try #require(StubURLProtocol.lastRequest(id: id))
-        #expect(request.url?.absoluteString == "https://mac.tail1.ts.net:8900/v1/dictations?enhance=0")
+        #expect(request.url?.absoluteString == "https://mac.tail1.ts.net:8900/v1/dictations?enhance=0&language=auto")
     }
 
     @Test func unauthorizedMapsToTypedError() async {

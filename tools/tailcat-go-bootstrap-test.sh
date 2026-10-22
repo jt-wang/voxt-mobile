@@ -6,6 +6,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cache="$root/build/voxt-tailcat-go-clean"
+# Go writes its module cache read-only; make it writable or rm fails on the previous run's cache.
+[[ ! -d "$cache" ]] || chmod -R u+w "$cache"
 rm -rf "$cache"
 mkdir -p "$cache"
 

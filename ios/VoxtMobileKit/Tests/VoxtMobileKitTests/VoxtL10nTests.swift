@@ -129,6 +129,25 @@ struct VoxtL10nTests {
         #expect(l10n.format("Mac returned HTTP %d.", language: "en", arguments: [503]) == "Mac returned HTTP 503.")
     }
 
+    /// Voxt's setting is Settings › General › Local API › "Allow other apps to dictate through Voxt";
+    /// Voxt itself translates the card and toggle only into Japanese and Simplified Chinese.
+    @Test func macSetupNamesVoxtsLocalAPISetting() throws {
+        let (l10n, _, _) = makeResolver()
+        let key = "Open Voxt Settings > General > Local API and turn on “Allow other apps to dictate through Voxt”."
+        let names = ["en": "Allow other apps to dictate through Voxt", "es": "Allow other apps to dictate through Voxt",
+                     "ko": "Allow other apps to dictate through Voxt", "zh-Hant": "Allow other apps to dictate through Voxt",
+                     "ja": "他のアプリから Voxt で音声入力を許可", "zh-Hans": "允许其他应用通过 Voxt 语音输入"]
+        for (language, toggle) in names {
+            #expect(l10n.hasTranslation(key, language: language))
+            #expect(l10n.string(key, language: language).contains(toggle), "\(language)")
+        }
+        // The source catalog, from this file in VoxtMobileKit/Tests/VoxtMobileKitTests/.
+        let kit = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let catalog = try String(contentsOf: kit.appendingPathComponent("Sources/VoxtMobileKit/Resources/Localizable.xcstrings"), encoding: .utf8)
+        // The setting's old name, built from parts so this file doesn't name it either.
+        for old in ["Remote" + " Input", "リモート" + "入力", "远程" + "输入", "遠端" + "輸入"] { #expect(!catalog.contains(old), "\(old)") }
+    }
+
     @Test func everyCatalogKeyIsTranslatedInEveryShippedLanguage() throws {
         // Resource-level missing-key detection: compare each language's compiled
         // .strings/.stringsdict key set against English inside the package bundle.

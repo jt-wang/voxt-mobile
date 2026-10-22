@@ -1,0 +1,215 @@
+diff --git a/Voxt/Mobile/docs/evidence/loopback-e2e/README.md b/Voxt/Mobile/docs/evidence/loopback-e2e/README.md
+index add8b788095b5acf9855d18ad8ec1414db84cbbb..dcc4289253812df4f8376f2584b29efab78585d7 100644
+--- a/Voxt/Mobile/docs/evidence/loopback-e2e/README.md
++++ b/Voxt/Mobile/docs/evidence/loopback-e2e/README.md
+@@ -29,8 +29,9 @@ python3 Voxt/Mobile/docs/evidence/loopback-e2e/run.py --models <folder with mlx-
+ | compose-prompts | `GET /v1/compose/prompts` | one built-in prompt per mode |
+ | correction | `POST /v1/corrections` with `correction-request.json` | the pair or null, as in `correction-response.json` (only when the contract lists corrections) |
+ | error-unauthorized, error-notFound, error-wrongMethod | wrong token, unknown path, `GET /v1/dictations` | equal to `errors.json` |
++| dictation-after-idle | `POST /v1/dictations?language=auto`, `testdata/jfk.wav`, sent after both models unloaded on idle (about two minutes after the last request), which also starts Voxt's idle memory reclamation | answers within 90 s with the text of jfk.wav; a stall behind the reclamation shows as no answer |
+ 
+-Model output is not deterministic, so text is compared by what it must contain, and everything else exactly. The checker was itself checked against a fake server that answers from the contract: 10 of 10 checks pass with the right token and 1 of 10 (the unauthorized check) with a wrong one.
++Model output is not deterministic, so text is compared by what it must contain, and everything else exactly. The checker was itself checked against a fake server that answers from the contract: 10 of 10 checks pass with the right token and 1 of 10 (the unauthorized check) with a wrong one; that fake server does not unload models, so dictation-after-idle is checked against Voxt itself: it fails on a build that stalls behind the reclamation and passes on one that does not.
+ 
+ ## Results
+ 
+diff --git a/Voxt/Mobile/docs/evidence/loopback-e2e/run.py b/Voxt/Mobile/docs/evidence/loopback-e2e/run.py
+index d770736dc8c55e36b2e72ed84951faec0f991421..411df16dd822ff34bafba916b5efe2e98b76890f 100644
+--- a/Voxt/Mobile/docs/evidence/loopback-e2e/run.py
++++ b/Voxt/Mobile/docs/evidence/loopback-e2e/run.py
+@@ -28,6 +28,9 @@ TESTDATA = VOXT / "Mobile/testdata"
+ RESULTS = HERE / "results"
+ SAMPLE_ID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+ HEALTH_TIMEOUT_SECONDS = 300
++# Reloading both models and dictating takes about 20 s here; the stall this catches lasted minutes.
++IDLE_ANSWER_SECONDS = 90
++IDLE_UNLOAD_LINES = ["MLX Audio model released", "Custom LLM model released"]
+ CHINESE_CHARACTER = re.compile(r"[一-鿿]")
+ 
+ 
+@@ -43,6 +46,7 @@ class Check:
+     passed: bool
+     compared: str
+     response: Response
++    failure: str = ""
+ 
+ 
+ def free_port() -> int:
+@@ -88,9 +92,9 @@ def serving_xctestrun(work: Path, variables: dict[str, str]) -> Path:
+     return destination
+ 
+ 
+-def send(url: str, token: str, path: str, method: str = "GET", body: bytes | None = None, content_type: str | None = None) -> Response:
+-    """One request through curl, so each check can be repeated by hand."""
+-    command = ["curl", "-sS", "-o", "-", "-w", "\n%{http_code}", "-X", method, "-H", f"Authorization: Bearer {token}"]
++def send(url: str, token: str, path: str, method: str = "GET", body: bytes | None = None, content_type: str | None = None, max_seconds: int = 600) -> Response:
++    """One request through curl, so each check can be repeated by hand. Status 0 means no answer within max_seconds."""
++    command = ["curl", "-sS", "--max-time", str(max_seconds), "-o", "-", "-w", "\n%{http_code}", "-X", method, "-H", f"Authorization: Bearer {token}"]
+     if content_type is not None:
+         command += ["-H", f"Content-Type: {content_type}"]
+     else:
+@@ -99,7 +103,7 @@ def send(url: str, token: str, path: str, method: str = "GET", body: bytes | Non
+         command += ["--data-binary", "@-"]
+     else:
+         pass
+-    finished = subprocess.run(command + [url + path], input=body, capture_output=True, timeout=600)
++    finished = subprocess.run(command + [url + path], input=body, capture_output=True, timeout=max_seconds + 30)
+     text, _, status = finished.stdout.decode().rpartition("\n")
+     return Response(status=int(status or 0), body=json.loads(text) if text.strip() else None)
+ 
+@@ -153,6 +157,33 @@ def run_checks(url: str, token: str) -> list[Check]:
+     return checks
+ 
+ 
++def check_dictation_after_idle(url: str, token: str, serve_log: Path, deadline: float) -> Check:
++    """Waits until both models unload on idle, which also starts Voxt's idle memory reclamation, then dictates once more."""
++    start = serve_log.stat().st_size
++    unloaded = False
++    while not unloaded and time.monotonic() < deadline:
++        time.sleep(5)
++        with open(serve_log, errors="replace") as log:
++            log.seek(start)
++            later = log.read()
++        unloaded = all(line in later for line in IDLE_UNLOAD_LINES)
++    compared = f"after both models unloaded on idle, the dictation answers within {IDLE_ANSWER_SECONDS} s with the text of jfk.wav"
++    if not unloaded:
++        return Check(name="dictation-after-idle", response=Response(status=0, body=None), compared=compared, passed=False, failure="the models did not unload on idle before the serve window ended, so this was not checked")
++    else:
++        pass
++    time.sleep(5)
++    answer = send(url, token, "/v1/dictations?language=auto", "POST", (TESTDATA / "jfk.wav").read_bytes(), "audio/wav", max_seconds=IDLE_ANSWER_SECONDS)
++    passed = answer.status == 200 and "country" in text_of(answer).lower()
++    if passed:
++        failure = ""
++    elif answer.status == 0:
++        failure = f"no answer within {IDLE_ANSWER_SECONDS} s: the request is stalled behind idle memory reclamation on the main actor"
++    else:
++        failure = f"answered {answer.status} without the jfk.wav text"
++    return Check(name="dictation-after-idle", response=answer, compared=compared, passed=passed, failure=failure)
++
++
+ def write_results(checks: list[Check], host: str) -> None:
+     RESULTS.mkdir(exist_ok=True)
+     for check in checks:
+@@ -165,7 +196,7 @@ def write_results(checks: list[Check], host: str) -> None:
+         (RESULTS / f"{check.name}.json").write_text(json.dumps(saved, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+     passed = sum(check.passed for check in checks)
+     lines = [f"Host: {host}. {passed} of {len(checks)} checks passed.", "", "| Check | Result | Compared |", "| --- | --- | --- |"]
+-    lines += [f"| {check.name} | {'pass' if check.passed else 'FAIL'} | {check.compared} |" for check in checks]
++    lines += [f"| {check.name} | {'pass' if check.passed else 'FAIL: ' + check.failure} | {check.compared} |" for check in checks]
+     (RESULTS / "summary.md").write_text("\n".join(lines) + "\n")
+     print("\n".join(lines))
+ 
+@@ -236,8 +267,10 @@ def main() -> int:
+             hand_off.write_text(f"VOXT_E2E_URL={url}\nVOXT_E2E_TOKEN={token}\n")
+             hand_off.chmod(0o600)
+             ready.touch()
++            window_ends = time.monotonic() + options.serve_seconds - 60
+             print(f"Local API up on {url}; hand-off file {hand_off}")
+             checks = run_checks(url, token)
++            checks.append(check_dictation_after_idle(url, token, serve_log, window_ends))
+             write_results(checks, "XCTest host (LocalAPILoopbackServeTests)")
+             print(f"Serving until the test's {options.serve_seconds} s are up.")
+             server.wait()
+diff --git a/Voxt/Voxt/Transcription/MLXTranscriber.swift b/Voxt/Voxt/Transcription/MLXTranscriber.swift
+index 304164e08f46e57a21070caba5006cd90f0fc5ad..4ec6c76ca96ab53bbf69c862c841f81530b63b84 100644
+--- a/Voxt/Voxt/Transcription/MLXTranscriber.swift
++++ b/Voxt/Voxt/Transcription/MLXTranscriber.swift
+@@ -48,7 +48,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+     var onPartialTranscription: ((String) -> Void)?
+     var dictionaryEntryProvider: (() -> [DictionaryEntry])?
+ 
+-    private let audioEngine = AVAudioEngine()
++    private let audioEngine: AVAudioEngine
+     private let inferenceTaskPriority: TaskPriority
+     private let audioLevelDelivery = MLXAudioLevelDelivery()
+     private let sampleStore = AudioSampleStore()
+@@ -104,6 +104,9 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+     private var didRetryCaptureStartup = false
+     private var activeCaptureUsesPreferredInputDevice = false
+     private var loggedSampleExtractionFailure = false
++    /// Reading `inputNode` creates the input unit and opens the default input device, which can
++    /// block for minutes; only a transcriber that configured capture has one to tear down.
++    private var hasConfiguredCaptureGraph = false
+     private var activeSessionBehavior = MLXModelManager.transcriptionBehavior(
+         for: MLXModelManager.defaultModelRepo
+     )
+@@ -120,8 +123,10 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+     init(
+         modelManager: MLXModelManager,
+         transcriptionPurpose: MLXTranscriptionPurpose = .dictation,
+-        inferenceTaskPriority: TaskPriority = .userInitiated
++        inferenceTaskPriority: TaskPriority = .userInitiated,
++        audioEngine: AVAudioEngine = AVAudioEngine()
+     ) {
++        self.audioEngine = audioEngine
+         self.modelManager = modelManager
+         self.transcriptionPurpose = transcriptionPurpose
+         self.inferenceTaskPriority = inferenceTaskPriority
+@@ -354,9 +359,12 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+               !nativeLiveRuntime.hasPendingWork else { return false }
+ 
+         sessionRevision += 1
+-        stopAudioEngine()
+-        audioEngine.inputNode.removeTap(onBus: 0)
+-        audioEngine.reset()
++        if hasConfiguredCaptureGraph {
++            stopAudioEngine()
++            audioEngine.inputNode.removeTap(onBus: 0)
++            audioEngine.reset()
++            hasConfiguredCaptureGraph = false
++        }
+         cancelActiveTasks()
+         earlyPrewarmTask?.cancel()
+         earlyPrewarmTask = nil
+@@ -796,6 +804,7 @@ class MLXTranscriber: ObservableObject, TranscriberProtocol {
+         }
+         audioEngine.reset()
+ 
++        hasConfiguredCaptureGraph = true
+         let inputNode = audioEngine.inputNode
+         inputNode.removeTap(onBus: 0)
+ 
+diff --git a/Voxt/VoxtTests/MLXTranscriberIdleReleaseTests.swift b/Voxt/VoxtTests/MLXTranscriberIdleReleaseTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..585c4efa6dc556f22fbbc4007c4a58f6ff870fee
+--- /dev/null
++++ b/Voxt/VoxtTests/MLXTranscriberIdleReleaseTests.swift
+@@ -0,0 +1,37 @@
++import AVFoundation
++import XCTest
++@testable import Voxt
++
++@MainActor
++final class MLXTranscriberIdleReleaseTests: XCTestCase {
++    /// The Local API makes a transcriber only to transcribe files, so idle reclamation finds one that
++    /// never captured. Reading `inputNode` there opens the default input device on the main actor,
++    /// and a slow device then holds every Local API request until it answers.
++    func testIdleReleaseOfATranscriberThatNeverCapturedLeavesTheAudioEngineAlone() {
++        let engine = AudioEngineAccessRecorder()
++        let transcriber = MLXTranscriber(
++            modelManager: MLXModelManager(modelRepo: MLXModelManager.defaultModelRepo),
++            audioEngine: engine
++        )
++
++        XCTAssertTrue(transcriber.releaseIdleResources())
++
++        XCTAssertEqual(engine.inputNodeReads, 0)
++        XCTAssertEqual(engine.resets, 0)
++    }
++}
++
++private final class AudioEngineAccessRecorder: AVAudioEngine {
++    private(set) var inputNodeReads = 0
++    private(set) var resets = 0
++
++    override var inputNode: AVAudioInputNode {
++        inputNodeReads += 1
++        return super.inputNode
++    }
++
++    override func reset() {
++        resets += 1
++        super.reset()
++    }
++}

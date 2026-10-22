@@ -3,7 +3,7 @@
 #
 #   ios/tools/set-team.sh                 find the team in this Mac's "Apple Development" certificate
 #   ios/tools/set-team.sh TEAM_ID         use this team
-#   ios/tools/set-team.sh TEAM_ID PREFIX  and this bundle ID prefix (default com.voxtmobile.<team>)
+#   ios/tools/set-team.sh TEAM_ID PREFIX  and this bundle ID prefix (default com.example.voxt.<team>)
 #
 # Writes ios/Config/Signing.local.xcconfig (not committed). Xcode makes the certificate when you
 # add your Apple ID in Xcode → Settings → Accounts and build once for a phone.
@@ -43,7 +43,7 @@ if ! [[ "$team" =~ ^[A-Z0-9]{10}$ ]]; then
   echo "\"$team\" isn't a team ID (10 capital letters and digits)." >&2
   exit 1
 fi
-prefix=${2:-com.voxtmobile.$(printf '%s' "$team" | tr 'A-Z' 'a-z')}
+prefix=${2:-com.example.voxt.$(printf '%s' "$team" | tr 'A-Z' 'a-z')}
 if ! [[ "$prefix" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]]; then
   echo "\"$prefix\" isn't a bundle ID prefix like com.example.voxt." >&2
   exit 1

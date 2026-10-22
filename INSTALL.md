@@ -33,12 +33,12 @@ tools/omni-dev.sh build
 tools/omni-dev.sh run
 ```
 
-`prepare` downloads Voxt's source (release 1.16.0, upstream tag `voxt-v1.16.0`), `build` builds it (the first time takes a while), and `run` opens **Voxt Omni Dev**. Leave this Terminal window open while you use Voxt Mobile; closing it quits Voxt Omni Dev. Next time, open Terminal and run `cd voxt-mobile` and `tools/omni-dev.sh run` again.
+`prepare` downloads Voxt's source (the pinned sglang-omni commit `ffd00d35`), `build` builds it (the first time takes a while), and `run` opens **Voxt Omni Dev**. Leave this Terminal window open while you use Voxt Mobile; closing it quits Voxt Omni Dev. Next time, open Terminal and run `cd voxt-mobile` and `tools/omni-dev.sh run` again.
 
 In Voxt Omni Dev:
 
 1. Open **Settings → Model**. Choose and download a speech model (for example Qwen3-ASR 0.6B) and a text model (for example Qwen3.5-4B). Every phone mode uses both.
-2. Open **Settings → General** and turn on **Remote Input**. This page also shows a **port** and an **Access token**; step 5 tells you when you need them.
+2. Open **Settings → General** and, under **Local API**, turn on **Allow other apps to dictate through Voxt**. This section also shows a **port** and an **Access token**; step 5 tells you when you need them.
 3. Recommended: in **Settings → Model**, click the gear button, and under **Memory** set **Unload Delay** to 10 minutes. Voxt then keeps the models loaded between dictations, so the next one from your phone doesn't wait for a model to load.
 
 ## 3. Prepare the iPhone
@@ -83,7 +83,7 @@ open build/connector-derived/Build/Products/Release/"Voxt Connector.app"
 
 In the **Voxt Connector** window:
 
-1. Click **Connect**. When Voxt Omni Dev and the Connector are signed by the same developer team, as in a released build, the Connector gets the port and token from Voxt itself. A Voxt Omni Dev you built with `tools/omni-dev.sh build` isn't signed by a team, so the Connector then asks for them: enter the **Port** and **Access token** from Voxt Omni Dev → **Settings → General → Remote Input** and click **Connect** again.
+1. Click **Connect**. When Voxt Omni Dev and the Connector are signed by the same developer team, as in a released build, the Connector gets the port and token from Voxt itself. A Voxt Omni Dev you built with `tools/omni-dev.sh build` isn't signed by a team, so the Connector then asks for them: enter the **Port** and **Access token** from Voxt Omni Dev → **Settings → General → Local API** and click **Connect** again.
 2. The window shows **Connected to Voxt** and the version.
 3. Optional: turn on **Open at login**. **Show in Dock** puts its icon in the Dock; with it off, open the Connector from the waveform icon in the menu bar.
 
@@ -110,7 +110,7 @@ From now on the Voxt keyboard works in any app. Two things worth setting on the 
 
 - **A build stops with an error:** copy the last 40 lines from Terminal and [open an issue](https://github.com/jt-wang/voxt-mobile/issues).
 - **Xcode says signing failed:** check that you're signed in under Xcode → Settings → Accounts, then run `ios/tools/set-team.sh` again. If it lists more than one team, run it again with the one you want: `ios/tools/set-team.sh <TEAM_ID>`.
-- **The Connector asks for a port and token, or says the token was rejected:** this Voxt Omni Dev isn't signed by the same team as the Connector; copy the port and Access token from Voxt Omni Dev's Remote Input settings.
+- **The Connector asks for a port and token, or says the token was rejected:** this Voxt Omni Dev isn't signed by the same team as the Connector; copy the port and Access token from Voxt Omni Dev's Local API settings.
 - **The phone can't reach the Mac:** Voxt Omni Dev (its Terminal window) and Voxt Connector must both be running, and both devices need internet access. If the QR code expired, click **Add iPhone** again.
 - **The keyboard says Allow Full Access is off:** open Settings › Voxt › Keyboards and turn on **Allow Full Access**.
 - **The app stopped opening after a week:** connect the phone and press Run in Xcode again.

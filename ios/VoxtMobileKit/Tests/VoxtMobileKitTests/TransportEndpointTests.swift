@@ -27,7 +27,7 @@ private actor EndpointProbe {
         for port in [48002, 48004] {
             _ = try await c.dictate(audio: Data([0, 1, 255]), contentType: "audio/wav", enhance: false)
             let (req, body) = try #require(StubURLProtocol.lastRequest(id: id))
-            #expect(req.url?.absoluteString == "http://127.0.0.1:\(port)/v1/dictations?enhance=0")
+            #expect(req.url?.absoluteString == "http://127.0.0.1:\(port)/v1/dictations?enhance=0&language=auto")
             #expect(req.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-bearer")
             #expect(body == Data([0, 1, 255]))
         }

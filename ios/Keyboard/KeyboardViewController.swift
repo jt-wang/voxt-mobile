@@ -1170,7 +1170,8 @@ final class KeyboardModel {
                let example = PersonalStyleExample.candidate(original: request.original, edited: request.edited) {
                 pendingStyle = request
                 styleCandidate = example
-            } else if learningStore?.isEnabled == true, request.isVocabularyCandidate, let learningChannel {
+            } else if learningStore?.isEnabled == true, request.isVocabularyCandidate, let learningChannel,
+                      MacFeatures.serves(.corrections, in: UserDefaults(suiteName: DictationChannel.appGroup) ?? .standard) {
                 pendingLearning = (learningChannel.submit(request), request)
             } else {
                 clearLearningSession()

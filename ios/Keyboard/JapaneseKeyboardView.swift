@@ -1,4 +1,5 @@
 import SwiftUI
+#if canImport(JapaneseInput)
 import JapaneseInput
 import TypingInput
 import VoxtMobileKit
@@ -100,3 +101,10 @@ struct JapaneseKeyboardView: View {
             .keyFeedback(.key(.numbers))
     }
 }
+#else
+/// Without ios/InputMethods.yml the Japanese layout is never offered, so this never shows.
+struct JapaneseKeyboardView: View {
+    let model: KeyboardModel
+    var body: some View { EmptyView() }
+}
+#endif

@@ -1,8 +1,8 @@
-diff --git a/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift b/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift
-index a40773e..d70749e 100644
---- a/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift
-+++ b/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift
-@@ -59,6 +59,63 @@ nonisolated enum RemoteInputComposePrompt {
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIComposePrompt.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIComposePrompt.swift
+index b2c79e9b2dbe0425bd77bb9b3031964b005ccd0a..36872fb6eb92cd099a0bdc0ba1848fd3436cff07 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIComposePrompt.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIComposePrompt.swift
+@@ -59,6 +59,63 @@ nonisolated enum LocalAPIComposePrompt {
              || Double(result.latinWords) < Double(source.latinWords) * 0.3
      }
  
@@ -66,7 +66,7 @@ index a40773e..d70749e 100644
      /// The selected text model as compose needs to see it. Every compose mode consults the
      /// model; the cases describe whether the currently selected model can run it at all.
      enum TextModel: Equatable, Sendable {
-@@ -98,10 +155,11 @@ nonisolated enum RemoteInputComposePrompt {
+@@ -98,10 +155,11 @@ nonisolated enum LocalAPIComposePrompt {
          let custom = options.customPrompt.map { $0.replacingOccurrences(of: targetLanguageTemplateVariable, with: options.targetLanguage ?? "") }
          switch options.mode {
          case .dictate:
@@ -80,7 +80,7 @@ index a40773e..d70749e 100644
              if retryingContextLeak {
                  task += usesChinese
                      ? "\n\n第一次输出重复了输入框里已有的文字。只输出这次口述整理后的内容，不要重复光标前后的文字。"
-@@ -109,7 +167,7 @@ nonisolated enum RemoteInputComposePrompt {
+@@ -109,7 +167,7 @@ nonisolated enum LocalAPIComposePrompt {
              }
              // No cursor context for plain cleanup: with it, Qwen3.5-4B copied the earlier text
              // into 4 of 6 outputs; without it, 6 of 6 were clean in one call.
@@ -89,7 +89,7 @@ index a40773e..d70749e 100644
                  task: task,
                  selection: nil,
                  context: nil,
-@@ -117,9 +175,10 @@ nonisolated enum RemoteInputComposePrompt {
+@@ -117,9 +175,10 @@ nonisolated enum LocalAPIComposePrompt {
                  vocabulary: options.vocabulary,
                  languageVariants: options.languageVariants,
                  styleExamples: styleExamples,
@@ -102,16 +102,16 @@ index a40773e..d70749e 100644
          case .translate:
              let target = options.targetLanguage ?? ""
              var task = custom ?? translateTask(target: target)
-@@ -259,7 +318,7 @@ nonisolated enum RemoteInputComposePrompt {
-                 VoxtLog.warning("Remote input dictate output repeated the cursor context after retry; returning raw transcript.")
+@@ -259,7 +318,7 @@ nonisolated enum LocalAPIComposePrompt {
+                 VoxtLog.warning("Local API dictate output repeated the cursor context after retry; returning raw transcript.")
                  return rawTranscription
              }
 -            return laidOutMessage(numberedCountedLines(appliedSelfCorrections(retried)))
 +            return joinedSpelledAcronyms(withoutDigitSpacing(laidOutMessage(numberedCountedLines(appliedSelfCorrections(retried)))))
          }
          if options.mode == .dictate, losesMixedDictationContent(first, rawText: rawTranscription) {
-             VoxtLog.warning("Remote input dictate cleanup lost mixed-language content; retrying previous prompt once.")
-@@ -268,7 +327,7 @@ nonisolated enum RemoteInputComposePrompt {
+             VoxtLog.warning("Local API dictate cleanup lost mixed-language content; retrying previous prompt once.")
+@@ -268,7 +327,7 @@ nonisolated enum LocalAPIComposePrompt {
                      for: options, rawTranscription: rawTranscription, retryingMixedDictation: true
                  ) else { return rawTranscription }
                  let retried = try await generate(previousPrompt).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -120,16 +120,16 @@ index a40773e..d70749e 100644
              } catch {
                  if error is CancellationError { throw error }
              }
-@@ -297,7 +356,7 @@ nonisolated enum RemoteInputComposePrompt {
-             VoxtLog.warning("Remote input write output still contained a placeholder after one retry; nothing inserted.")
-             throw RemoteInputError(message: "Couldn't write that message. Try saying who it's for.")
+@@ -297,7 +356,7 @@ nonisolated enum LocalAPIComposePrompt {
+             VoxtLog.warning("Local API write output still contained a placeholder after one retry; nothing inserted.")
+             throw LocalAPIError(message: "Couldn't write that message. Try saying who it's for.")
          }
 -        if options.mode == .dictate { return laidOutMessage(numberedCountedLines(appliedSelfCorrections(first))) }
 +        if options.mode == .dictate { return joinedSpelledAcronyms(withoutDigitSpacing(laidOutMessage(numberedCountedLines(appliedSelfCorrections(first))))) }
          guard options.mode == .edit else { return first }
          let edited = withoutRepeatedClosing(withoutSurroundingField(first, options: options), options: options)
          let selection = options.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
-@@ -779,101 +838,28 @@ nonisolated enum RemoteInputComposePrompt {
+@@ -779,101 +838,28 @@ nonisolated enum LocalAPIComposePrompt {
          "pt-BR": "Portuguese (Brazil)",
      ]
  
@@ -249,37 +249,37 @@ index a40773e..d70749e 100644
      """
  
      private static let previousChineseDictationInstruction = """
-diff --git a/Voxt/VoxtTests/RemoteInputComposePromptTests.swift b/Voxt/VoxtTests/RemoteInputComposePromptTests.swift
-index 560307f..0fec11c 100644
---- a/Voxt/VoxtTests/RemoteInputComposePromptTests.swift
-+++ b/Voxt/VoxtTests/RemoteInputComposePromptTests.swift
-@@ -163,9 +163,9 @@ final class RemoteInputComposePromptTests: XCTestCase {
-         let prompt = try XCTUnwrap(RemoteInputComposePrompt.instruction(for: dictate, rawTranscription: "Hello there."))
+diff --git a/Voxt/VoxtTests/LocalAPIComposePromptTests.swift b/Voxt/VoxtTests/LocalAPIComposePromptTests.swift
+index deba6a5e0fc3b46bb84553cb8642ac827e60321e..59356fb863712158ca912772b01756f1d484b289 100644
+--- a/Voxt/VoxtTests/LocalAPIComposePromptTests.swift
++++ b/Voxt/VoxtTests/LocalAPIComposePromptTests.swift
+@@ -163,9 +163,9 @@ final class LocalAPIComposePromptTests: XCTestCase {
+         let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: dictate, rawTranscription: "Hello there."))
          XCTAssertTrue(prompt.hasPrefix("Write the speech as a haiku."))
          XCTAssertTrue(prompt.contains("{{RAW_TRANSCRIPTION}}"))
 -        XCTAssertFalse(prompt.contains("Clean up the transcribed speech."))
 +        XCTAssertFalse(prompt.contains("Turn this speech transcript into the text this speaker would have written themselves:"))
-         let builtIn = try XCTUnwrap(RemoteInputComposePrompt.instruction(for: options(.dictate), rawTranscription: "Hello there."))
+         let builtIn = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.dictate), rawTranscription: "Hello there."))
 -        XCTAssertTrue(builtIn.contains("Clean up the transcribed speech."))
 +        XCTAssertTrue(builtIn.contains("Turn this speech transcript into the text this speaker would have written themselves:"))
  
          var translate = options(.translate, targetLanguage: "fr")
          translate.customPrompt = "Translate into {{TARGET_LANGUAGE}} like a pirate."
-@@ -207,7 +207,7 @@ final class RemoteInputComposePromptTests: XCTestCase {
+@@ -207,7 +207,7 @@ final class LocalAPIComposePromptTests: XCTestCase {
      func testBuiltInPromptsListEveryModeForThePhoneEditor() {
-         let prompts = RemoteInputComposePrompt.builtInPrompts()
+         let prompts = LocalAPIComposePrompt.builtInPrompts()
          XCTAssertEqual(Set(prompts.keys), ["dictate", "edit", "translate", "write"])
 -        XCTAssertTrue(prompts["dictate"]?.contains("Clean up the transcribed speech.") == true)
 +        XCTAssertTrue(prompts["dictate"]?.contains("Turn this speech transcript into the text this speaker would have written themselves:") == true)
          XCTAssertTrue(prompts["translate"]?.contains("{{TARGET_LANGUAGE}}") == true)
          XCTAssertFalse(prompts.values.contains { $0.contains("{{RAW_TRANSCRIPTION}}") })
      }
-@@ -217,41 +217,6 @@ final class RemoteInputComposePromptTests: XCTestCase {
+@@ -217,41 +217,6 @@ final class LocalAPIComposePromptTests: XCTestCase {
          after: "Cheers — I'll send Alice the file at 3."
      )
  
 -    func testDictatePromptMatchesTranscriptLanguageAndIncludesCorrectionExamples() throws {
--        let chinese = try XCTUnwrap(RemoteInputComposePrompt.instruction(
+-        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(
 -            for: options(.dictate), rawTranscription: "第一，保存报告；第二，发送邮件。"
 -        ))
 -        XCTAssertTrue(chinese.contains("整理转写的口述内容。"))
@@ -288,7 +288,7 @@ index 560307f..0fec11c 100644
 -        XCTAssertTrue(chinese.contains("输出：把评审改到周四下午三点。"))
 -        XCTAssertTrue(chinese.contains("口述转写：{{RAW_TRANSCRIPTION}}"))
 -        XCTAssertFalse(chinese.contains("Clean up the transcribed speech."))
--        let english = try XCTUnwrap(RemoteInputComposePrompt.instruction(
+-        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(
 -            for: options(.dictate), rawTranscription: "Move the review to Thursday."
 -        ))
 -        XCTAssertTrue(english.contains("Clean up the transcribed speech."))
@@ -301,11 +301,11 @@ index 560307f..0fec11c 100644
 -    // A landlord email dictated as "Hi Karen, first …, second …, and also …" came back as one
 -    // paragraph (EN) or as "- 第一，…" bullets with the closing merged into an item (ZH).
 -    func testDictatePromptNumbersCountedPointsAndLaysOutMessages() throws {
--        let english = try XCTUnwrap(RemoteInputComposePrompt.instruction(
+-        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(
 -            for: options(.dictate), rawTranscription: "Hi Karen, first the heater, second the window."
 -        ))
 -        XCTAssertTrue(english.contains("number them 1., 2., 3. on separate lines and drop the counting words"))
--        let chinese = try XCTUnwrap(RemoteInputComposePrompt.instruction(
+-        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(
 -            for: options(.dictate), rawTranscription: "王先生您好，第一，暖气坏了，第二，窗户关不上。"
 -        ))
 -        XCTAssertTrue(chinese.contains("编号写成 1. 2. 3.，去掉“第一”“还有”等分点词"))
@@ -316,10 +316,10 @@ index 560307f..0fec11c 100644
      // Cleaned outputs of Qwen3.5-4B for dictated messages with uncounted points.
      func testMessageWithGreetingAndThreePointsIsLaidOutWithANumberedList() {
          XCTAssertEqual(
-@@ -543,9 +508,9 @@ final class RemoteInputComposePromptTests: XCTestCase {
+@@ -543,9 +508,9 @@ final class LocalAPIComposePromptTests: XCTestCase {
  
      func testPlainDictateAlsoGetsTheCleanupPrompt() {
-         let prompt = RemoteInputComposePrompt.instruction(for: options(.dictate))!
+         let prompt = LocalAPIComposePrompt.instruction(for: options(.dictate))!
 -        XCTAssertTrue(prompt.contains("Clean up"), "even a default compose dictate asks for cleanup")
 +        XCTAssertTrue(prompt.contains("Turn this speech transcript"), "even a default compose dictate asks for cleanup")
          XCTAssertTrue(prompt.contains("fillers"))
@@ -328,10 +328,10 @@ index 560307f..0fec11c 100644
          XCTAssertTrue(prompt.contains(EnhancementPromptResolver.rawTranscriptionTemplateVariable))
          XCTAssertFalse(prompt.contains("Tone:"), "automatic style adds no tone line")
          XCTAssertFalse(prompt.contains("Prefer these spellings"))
-@@ -554,21 +519,19 @@ final class RemoteInputComposePromptTests: XCTestCase {
+@@ -554,21 +519,19 @@ final class LocalAPIComposePromptTests: XCTestCase {
  
      func testDictatePromptPreservesSpokenLanguageWithoutVariants() {
-         let prompt = RemoteInputComposePrompt.instruction(for: options(.dictate))!
+         let prompt = LocalAPIComposePrompt.instruction(for: options(.dictate))!
 -        XCTAssertTrue(prompt.contains("Do not translate"), "dictate must never translate")
 -        XCTAssertTrue(prompt.lowercased().contains("mixes languages"), "mixed-language speech keeps its language mix")
 -        XCTAssertTrue(prompt.contains("original spoken language"))
@@ -339,7 +339,7 @@ index 560307f..0fec11c 100644
      }
  
      func testDictateWithOptionsBuildsACleanupPrompt() {
-         let prompt = RemoteInputComposePrompt.instruction(
+         let prompt = LocalAPIComposePrompt.instruction(
              for: options(.dictate, contextBefore: "Dear team,", style: .formal, vocabulary: ["SGLang"])
          )!
 -        XCTAssertTrue(prompt.contains("Clean up"), "option-carrying dictate asks for cleanup")
@@ -353,7 +353,7 @@ index 560307f..0fec11c 100644
          XCTAssertTrue(prompt.contains(EnhancementPromptResolver.rawTranscriptionTemplateVariable))
      }
  
-@@ -990,7 +953,7 @@ final class RemoteInputComposePromptTests: XCTestCase {
+@@ -990,7 +953,7 @@ final class LocalAPIComposePromptTests: XCTestCase {
              XCTAssertTrue(prompt.contains(wordingExample.after))
              XCTAssertTrue(prompt.contains("Do not change facts, names, numbers, or the output language."))
              XCTAssertTrue(prompt.contains("Prefer these spellings: grey."))
@@ -362,7 +362,7 @@ index 560307f..0fec11c 100644
              let spellings = prompt.range(of: "Prefer these spellings")!
              let section = prompt.range(of: "Personal wording examples")!
              XCTAssertLessThan(task.lowerBound, section.lowerBound)
-@@ -1023,7 +986,7 @@ final class RemoteInputComposePromptTests: XCTestCase {
+@@ -1023,7 +986,7 @@ final class LocalAPIComposePromptTests: XCTestCase {
              XCTAssertFalse(prompt.contains("Cheers"))
              XCTAssertTrue(prompt.contains("Tone: \(style.rawValue)."))
              XCTAssertTrue(prompt.contains("Prefer these spellings: grey."))
@@ -371,7 +371,7 @@ index 560307f..0fec11c 100644
          }
      }
  
-@@ -1095,4 +1058,68 @@ final class RemoteInputComposePromptTests: XCTestCase {
+@@ -1095,4 +1058,68 @@ final class LocalAPIComposePromptTests: XCTestCase {
          )
          XCTAssertTrue(dictation.content.contains("Language rule"), "the standard dictation prompt keeps its rules")
      }
@@ -381,27 +381,27 @@ index 560307f..0fec11c 100644
 +    // On Qwen3.5-4B, the rule-based prompt passed 14/24 and 16/24 of two test
 +    // sets (fillers, self-corrections, casual, rambling, lists, terms in zh, en, ja, mixed); these principles 19/24 and 21/24.
 +    func testDictatePromptFollowsTheTranscriptsScript() throws {
-+        let japanese = try XCTUnwrap(RemoteInputComposePrompt.instruction(for: options(.dictate), rawTranscription: "えーと、明日の会議は三時からです。"))
++        let japanese = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.dictate), rawTranscription: "えーと、明日の会議は三時からです。"))
 +        XCTAssertTrue(japanese.contains("話し手が自分で書いたらこうなる"), "kana gets the Japanese prompt")
 +        XCTAssertTrue(japanese.contains("書き起こし：{{RAW_TRANSCRIPTION}}"))
 +        XCTAssertTrue(japanese.hasSuffix("出力："))
 +        // 9 Han and 15 Latin letters: under the old 50% rule this went to the English prompt and came back translated.
-+        let mixed = try XCTUnwrap(RemoteInputComposePrompt.instruction(for: options(.dictate), rawTranscription: "我觉得这个 project 的 timeline 有点紧"))
++        let mixed = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.dictate), rawTranscription: "我觉得这个 project 的 timeline 有点紧"))
 +        XCTAssertTrue(mixed.contains("说话人自己会写出来的文字"), "Chinese with English words gets the Chinese prompt")
 +        XCTAssertTrue(mixed.contains("口述转写：{{RAW_TRANSCRIPTION}}"))
 +        XCTAssertTrue(mixed.hasSuffix("输出："))
-+        let english = try XCTUnwrap(RemoteInputComposePrompt.instruction(for: options(.dictate), rawTranscription: "Move the review to Thursday."))
++        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.dictate), rawTranscription: "Move the review to Thursday."))
 +        XCTAssertTrue(english.contains("the text this speaker would have written themselves"))
 +        XCTAssertTrue(english.hasSuffix("Output:"))
 +    }
 +
 +    // Qwen3.5-4B wrote "会議は 4 時から" and "10 分" even when asked not to.
 +    func testDictateDropsSpacesBetweenDigitsAndHanOrKana() async throws {
-+        let japanese = try await RemoteInputComposePrompt.compose(rawTranscription: "会議は四時から", options: options(.dictate)) { _ in
++        let japanese = try await LocalAPIComposePrompt.compose(rawTranscription: "会議は四時から", options: options(.dictate)) { _ in
 +            "会議は 4 時から、10 分くらいで着く。"
 +        }
 +        XCTAssertEqual(japanese, "会議は4時から、10分くらいで着く。")
-+        let english = try await RemoteInputComposePrompt.compose(rawTranscription: "Meet at 4 pm", options: options(.dictate)) { _ in
++        let english = try await LocalAPIComposePrompt.compose(rawTranscription: "Meet at 4 pm", options: options(.dictate)) { _ in
 +            "Meet at 4 pm in room 2."
 +        }
 +        XCTAssertEqual(english, "Meet at 4 pm in room 2.")
@@ -409,17 +409,17 @@ index 560307f..0fec11c 100644
 +
 +    // The recognizer spells some acronyms letter by letter inside Chinese ("放到 C I C D 里面").
 +    func testSpelledOutAcronymsNextToChineseOrJapaneseAreJoined() {
-+        XCTAssertEqual(RemoteInputComposePrompt.joinedSpelledAcronyms("整个东西应该放到 C I C D 里面，每次都要跑。"), "整个东西应该放到 CI/CD 里面，每次都要跑。")
-+        XCTAssertEqual(RemoteInputComposePrompt.joinedSpelledAcronyms("这个 A P I 太慢了"), "这个 API 太慢了")
-+        XCTAssertEqual(RemoteInputComposePrompt.joinedSpelledAcronyms("用 A I 写的"), "用 AI 写的")
-+        XCTAssertEqual(RemoteInputComposePrompt.joinedSpelledAcronyms("APIの I O が遅い"), "APIの I/O が遅い")
++        XCTAssertEqual(LocalAPIComposePrompt.joinedSpelledAcronyms("整个东西应该放到 C I C D 里面，每次都要跑。"), "整个东西应该放到 CI/CD 里面，每次都要跑。")
++        XCTAssertEqual(LocalAPIComposePrompt.joinedSpelledAcronyms("这个 A P I 太慢了"), "这个 API 太慢了")
++        XCTAssertEqual(LocalAPIComposePrompt.joinedSpelledAcronyms("用 A I 写的"), "用 AI 写的")
++        XCTAssertEqual(LocalAPIComposePrompt.joinedSpelledAcronyms("APIの I O が遅い"), "APIの I/O が遅い")
 +        for unchanged in ["Plan A I think works.", "I went to A B C Mart.", "这个 API 太慢了", "用 Q 键"] {
-+            XCTAssertEqual(RemoteInputComposePrompt.joinedSpelledAcronyms(unchanged), unchanged)
++            XCTAssertEqual(LocalAPIComposePrompt.joinedSpelledAcronyms(unchanged), unchanged)
 +        }
 +    }
 +
 +    func testDictateJoinsSpelledOutAcronyms() async throws {
-+        let result = try await RemoteInputComposePrompt.compose(rawTranscription: "放到 C I C D 里面", options: options(.dictate)) { _ in
++        let result = try await LocalAPIComposePrompt.compose(rawTranscription: "放到 C I C D 里面", options: options(.dictate)) { _ in
 +            "整个放进 C I C D 里，每次强制跑。"
 +        }
 +        XCTAssertEqual(result, "整个放进 CI/CD 里，每次强制跑。")
@@ -432,7 +432,7 @@ index 560307f..0fec11c 100644
 +        for (speech, intent) in [("Um, see you later.", "Keep their meaning, their voice and their register"),
 +                                 ("嗯，明天见。", "保留他的意思、口吻和语体"),
 +                                 ("えーと、また明日。", "意味、話し方の雰囲気、丁寧さの度合いはそのままにし")] {
-+            let prompt = try XCTUnwrap(RemoteInputComposePrompt.instruction(for: options(.dictate), rawTranscription: speech))
++            let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.dictate), rawTranscription: speech))
 +            XCTAssertTrue(prompt.contains(intent), intent)
 +            let task = prompt.components(separatedBy: "\n\n")[0]
 +            XCTAssertLessThanOrEqual(task.components(separatedBy: "\n").count, 5, "a few lines, not a rule list")

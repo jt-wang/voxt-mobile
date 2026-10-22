@@ -1,6 +1,6 @@
 import Foundation
 
-/// Talks to Voxt's Remote Input server on the Mac.
+/// Talks to Voxt's Local API server on the Mac.
 public struct VoxtClient: Sendable {
     public enum Error: Swift.Error, Equatable, LocalizedError {
         case unauthorized
@@ -10,6 +10,7 @@ public struct VoxtClient: Sendable {
         case editNotApplied
         case cloudModelSelected
         case modelLocationUnknown
+        case notOnThisMac
 
         public var errorDescription: String? {
             switch self {
@@ -20,6 +21,7 @@ public struct VoxtClient: Sendable {
             case let .server(status, message): message.isEmpty ? VoxtL10n.shared.format("Mac returned HTTP %d.", status) : message
             case .editNotApplied: VoxtL10n.shared.string("Couldn't apply that edit")
             case .invalidResponse: "The Mac sent a response this app doesn't understand."
+            case .notOnThisMac: VoxtL10n.shared.string("Update Voxt on your Mac to use this.")
             }
         }
     }
@@ -41,11 +43,35 @@ public struct VoxtClient: Sendable {
         public var version: String
     }
 
+    /// Local API endpoints a Mac may leave out; capabilities name the ones it serves.
+    public enum Feature: String, CaseIterable, Sendable {
+        case compose, composePrompts = "compose/prompts", corrections, historySync = "history/sync"
+    }
+
+    /// `GET /v1/capabilities`: where the selected models run (`locations`) and which endpoints
+    /// the Mac serves. Older Voxt sends only the two locations, at the top level, and serves all.
     public struct Capabilities: Decodable, Equatable, Sendable {
         public var transcription: String
         public var text: String
+        public var endpoints: Set<String>?
         public var isLocal: Bool { transcription == "local" && text == "local" }
         public var hasRemote: Bool { transcription == "remote" || text == "remote" }
+        public func supports(_ feature: Feature) -> Bool { endpoints?.contains(feature.rawValue) ?? true }
+
+        private struct Locations: Decodable { var transcription: String; var text: String }
+        private enum CodingKeys: String, CodingKey { case locations, endpoints, transcription, text }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let locations = try container.decodeIfPresent(Locations.self, forKey: .locations) {
+                transcription = locations.transcription
+                text = locations.text
+            } else {
+                transcription = try container.decode(String.self, forKey: .transcription)
+                text = try container.decode(String.self, forKey: .text)
+            }
+            endpoints = try container.decodeIfPresent([String].self, forKey: .endpoints).map(Set.init)
+        }
     }
 
     public let server: ServerConfig
@@ -98,6 +124,7 @@ public struct VoxtClient: Sendable {
 
     public func syncHistory(_ payload: HistorySyncRequest) async throws -> HistorySyncResponse {
         try payload.validate()
+        try await require(.historySync)
         var request = URLRequest(url: try await endpoint(path: "v1/history/sync"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -118,6 +145,8 @@ public struct VoxtClient: Sendable {
         let requestStart = Date()
         var url = try await audioEndpoint(path: "v1/dictations")
         if !enhance { url.append(queryItems: [URLQueryItem(name: "enhance", value: "0")]) }
+        // Without it the Mac applies its own language settings; the phone has none to send.
+        url.append(queryItems: [URLQueryItem(name: "language", value: "auto")])
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
@@ -150,6 +179,7 @@ public struct VoxtClient: Sendable {
         struct Body: Encodable {
             var audio: Data
             var contentType: String
+            var language = "auto"
             var options: CompositionOptions
         }
         struct Response: Decodable {
@@ -179,7 +209,7 @@ public struct VoxtClient: Sendable {
 
     public func correction(for passage: CorrectionLearningRequest) async throws -> LearnedCorrection? {
         guard passage.isValid else { throw Error.invalidResponse }
-        try await requireModelConsent()
+        try await requireModelConsent(for: .corrections)
         struct Response: Decodable {
             let correction: LearnedCorrection?
             enum CodingKeys: String, CodingKey { case correction }
@@ -202,6 +232,7 @@ public struct VoxtClient: Sendable {
     /// The Mac's built-in instruction per mode, to prefill the Developer prompt editor.
     public func builtInPrompts() async throws -> [CompositionOptions.Mode: String] {
         struct Response: Decodable { var prompts: [String: String] }
+        try await require(.composePrompts)
         var request = URLRequest(url: try await endpoint(path: "v1/compose/prompts"))
         request.timeoutInterval = 10
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -218,13 +249,25 @@ public struct VoxtClient: Sendable {
         return try await send(request)
     }
 
-    private func requireModelConsent() async throws {
-        guard !(await allowCloudModels()) else { return }
+    /// Fails with `notOnThisMac` before calling an endpoint the Mac's capabilities leave out.
+    private func require(_ feature: Feature) async throws {
+        guard try await capabilities().supports(feature) else { throw Error.notOnThisMac }
+    }
+
+    /// With cloud models off, the Mac must report local models; one capabilities read also
+    /// checks that it serves `feature`.
+    private func requireModelConsent(for feature: Feature? = nil) async throws {
+        let allowCloud = await allowCloudModels()
+        if allowCloud {
+            if let feature { try await require(feature) }
+            return
+        }
         let capabilities: Capabilities
         do { capabilities = try await self.capabilities() }
         catch Error.unauthorized { throw Error.unauthorized }
         catch Error.transportUnavailable { throw Error.transportUnavailable }
         catch { throw Error.modelLocationUnknown }
+        if let feature, !capabilities.supports(feature) { throw Error.notOnThisMac }
         guard capabilities.isLocal else {
             throw capabilities.hasRemote ? Error.cloudModelSelected : Error.modelLocationUnknown
         }

@@ -19,20 +19,27 @@ public struct ConnectorGrant: Sendable, Equatable {
     }
 }
 
-/// Asks Voxt for its Remote Input port and Access token over a Unix socket. Each side checks
+/// Asks Voxt for its Local API port and Access token over a Unix socket. Each side checks
 /// the other's code signature first; Voxt asks the user once ("Allow Voxt Connector to use
 /// Voxt?").
 public struct ConnectorLink: ConnectorAuthorizing {
     public enum Failure: Error, Equatable { case voxtNotRunning, untrustedVoxt, denied, rejectedBySignature, invalidReply }
 
     /// Voxt must be signed by the same team as this Connector (read at runtime, so no team ID
-    /// is built in), with the release or development bundle ID and the hardened runtime.
-    public static func voxtRequirement(team: String) -> String {
-        #"anchor apple generic and certificate leaf[subject.OU] = ""# + team + #"" and (identifier "com.voxt.Voxt" or identifier "com.voxt.Voxt.omni.dev")"#
+    /// is built in), with one of its bundle IDs (release and development by default) and the
+    /// hardened runtime.
+    public static func voxtRequirement(team: String,
+                                       identifiers: [String] = ConnectorIdentity.voxtBundleIdentifiers()) -> String {
+        let names = identifiers.map { #"identifier ""# + $0 + #"""# }.joined(separator: " or ")
+        return #"anchor apple generic and certificate leaf[subject.OU] = ""# + team + #"" and ("# + names + ")"
     }
-    public static var socketPath: String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: "Library/Application Support/Voxt/connector.sock").path
+    /// Where Voxt's socket may be: at the top of each trusted Voxt's sandbox container, then where
+    /// an unsandboxed Voxt puts it. A sandboxed Voxt can only write inside its container, and a
+    /// socket path holds at most 103 bytes, too few for Application Support inside it.
+    public static func socketPaths(identifiers: [String] = ConnectorIdentity.voxtBundleIdentifiers(),
+                                   home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [String] {
+        identifiers.map { home.appending(path: "Library/Containers/\($0)/Data/connector.sock").path }
+            + [home.appending(path: "Library/Application Support/Voxt/connector.sock").path]
     }
 
     private let connect: @Sendable () throws -> Int32
@@ -107,7 +114,15 @@ public struct ConnectorLink: ConnectorAuthorizing {
         }
     }
 
-    public static func connectToVoxt(path: String = socketPath) throws -> Int32 {
+    /// Connects to the first path where a Voxt answers; a quit Voxt can leave its socket file behind.
+    public static func connectToVoxt(paths: [String] = socketPaths()) throws -> Int32 {
+        for path in paths {
+            if let fd = try? connectToVoxt(path: path) { return fd }
+        }
+        throw Failure.voxtNotRunning
+    }
+
+    public static func connectToVoxt(path: String) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw Failure.voxtNotRunning }
         var address = sockaddr_un()

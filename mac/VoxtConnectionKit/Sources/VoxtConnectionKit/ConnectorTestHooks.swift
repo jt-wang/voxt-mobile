@@ -11,7 +11,7 @@ public enum ConnectorTestHooks {
     public static let environmentKey = "VOXT_CONNECTOR_TEST_HOOKS"
 
     public static func notificationName(_ command: ConnectorTestCommand) -> Notification.Name {
-        Notification.Name("com.voxtmobile.connector.test.\(command.rawValue)")
+        Notification.Name("\(ConnectorIdentity.defaultBundleIdentifier).test.\(command.rawValue)")
     }
 
     /// Returns the observers to keep, or nil when the app wasn't launched for tests.

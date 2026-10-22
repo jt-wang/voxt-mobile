@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible "Voxt Omni Dev" checkout with the Voxt Mobile Remote Input port.
+# Reproducible "Voxt Omni Dev" checkout with Voxt's Local API for Voxt Mobile.
 #
 #   tools/omni-dev.sh prepare
 #   tools/omni-dev.sh build
@@ -16,7 +16,7 @@
 # build reuses the native runtime at build/omni-runtime when present (building
 # it there first only if missing) and builds the app into build/omni-dev. run
 # starts the app with an isolated file-data home (CFFIXED_USER_HOME) and the
-# Remote Input server on an unused configurable port; preferences are isolated
+# Local API on an unused configurable port; preferences are isolated
 # by the app's own com.voxt.Voxt.omni.dev bundle id. release builds the Release
 # configuration into build/omni-dev-release with the source and build folders mapped
 # out of debug info, stamps like build, and copies the app to OUT_DIR
@@ -26,8 +26,9 @@
 #
 # Environment:
 #   OMNI_DEV_SOURCE_DIR         Checkout location (default build/omni-source).
-#   OMNI_DEV_REMOTE_INPUT_PORT  Port for the Remote Input server (default 47920;
-#                               the regular Voxt and its tailscale port stay untouched).
+#   OMNI_DEV_LOCAL_API_PORT     Port for the Local API (default 47920, so a regular
+#                               Voxt on its own port stays untouched; the earlier name
+#                               OMNI_DEV_REMOTE_INPUT_PORT is still read).
 #   VOXT_SHARED_MODELS          Existing <root>/mlx-audio model directory to share.
 #   VOXT_DEV_HOME               Isolated home for the app (default build/omni-home).
 #   OMNI_DEV_RUNTIME_DIR        Native runtime to reuse or build (default build/omni-runtime);
@@ -36,18 +37,12 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 source_dir="${OMNI_DEV_SOURCE_DIR:-$repo_root/build/omni-source}"
-# Applied in this order: the Remote Input port, the upstream-ready guard that keeps
-# cleanup in the spoken language, that guard on the Remote Input compose path, and the
-# dictate cleanup principles (prompt per script, numbered counted points, one-line short messages).
-patch_files=(
-    "$repo_root/tools/patches/omni-remote-input-final.patch"
-    "$repo_root/tools/patches/omni-keep-input-language.patch"
-    "$repo_root/tools/patches/omni-remote-input-keep-language.patch"
-    "$repo_root/tools/patches/omni-dictate-principles.patch"
-)
+# One patch per commit of the Voxt side of the sglang-omni pull request (the Voxt/ part
+# only: the checkout is sparse), applied in the order of their number.
+patch_files=("$repo_root"/tools/patches/[0-9][0-9]-*.patch)
 upstream_url=https://github.com/sgl-project/sglang-omni
-pinned_revision=5f3a4e25dc1292f2e565ad10b37357416a07813c
-remote_input_port_default=47920
+pinned_revision=ffd00d351200d4de72493d0c707154450da4f2d2
+local_api_port_default=47920
 dev_home_default="$repo_root/build/omni-home"
 runtime_dir="${OMNI_DEV_RUNTIME_DIR:-$repo_root/build/omni-runtime}"
 runtime_binary="$runtime_dir/bin/qwen3_asr_server"
@@ -131,8 +126,8 @@ Revert or commit them, or delete $source_dir to start over."
     verify_patched_content ||
         die "the freshly applied patches do not verify; $source_dir is inconsistent"
 
-    test -f "$source_dir/Voxt/Voxt/Core/RemoteInput/RemoteInputServer.swift" ||
-        die "Remote Input sources missing after prepare"
+    test -f "$source_dir/Voxt/Voxt/Core/LocalAPI/LocalAPIServer.swift" ||
+        die "Local API sources missing after prepare"
     echo "prepare: $(git -C "$source_dir" rev-parse --short HEAD) + ${#patch_files[@]} patches at $source_dir"
 }
 
@@ -214,15 +209,20 @@ release() {
 # Records in Info.plist which commits built the app; tools/release-gate.py checks it before a release.
 # VoxtUpstreamRevision is the pinned sglang-omni commit. VoxtSourceRevision is this repo's commit, and
 # only when the checkout has no uncommitted or untracked files: otherwise the app isn't that commit.
+# VoxtConnectorBundleIdentifier is the Connector ID this app trusts on its Connector socket: the one
+# tools/build-connector.py gives the Connector (VOXT_CONNECTOR_SIGNING_LOCAL or mac/VoxtConnector/Config).
 stamp() {
-    local app="$1" plist="$1/Contents/Info.plist" upstream source=""
+    local app="$1" plist="$1/Contents/Info.plist" upstream source="" connector
     test -f "$plist" || die "stamp: $plist not found"
+    connector="$(python3 -I "$repo_root/tools/build-connector.py" --print-bundle-id)" ||
+        die "stamp: no Connector bundle ID (see the message above)"
     upstream="$(git -C "$source_dir" rev-parse HEAD 2>/dev/null)" || die "stamp: no checkout at $source_dir"
     [ "$upstream" = "$pinned_revision" ] || die "stamp: $source_dir is at $upstream, not the pinned $pinned_revision"
     if [ -z "$(git -C "$repo_root" status --porcelain --untracked-files=all 2>&1)" ]; then
         source="$(git -C "$repo_root" rev-parse HEAD)"
     fi
     plutil -replace VoxtUpstreamRevision -string "$upstream" "$plist"
+    plutil -replace VoxtConnectorBundleIdentifier -string "$connector" "$plist"
     if [ -n "$source" ]; then
         plutil -replace VoxtSourceRevision -string "$source" "$plist"
     else
@@ -231,21 +231,21 @@ stamp() {
     fi
     /usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime "$app" >/dev/null 2>&1 ||
         die "stamp: re-signing $app failed"
-    echo "stamp: VoxtSourceRevision=${source:-none} VoxtUpstreamRevision=$upstream"
+    echo "stamp: VoxtSourceRevision=${source:-none} VoxtUpstreamRevision=$upstream VoxtConnectorBundleIdentifier=$connector"
 }
 
 app_executable="$derived_data/Build/Products/Debug/Voxt Omni Dev.app/Contents/MacOS/Voxt Omni Dev"
 
 run() {
     test -x "$app_executable" || die "Build first: $0 build"
-    local remote_input_port="${OMNI_DEV_REMOTE_INPUT_PORT:-$remote_input_port_default}"
-    case "$remote_input_port" in
-        '' | *[!0-9]*) die "OMNI_DEV_REMOTE_INPUT_PORT must be a number, got '$remote_input_port'" ;;
+    local local_api_port="${OMNI_DEV_LOCAL_API_PORT:-${OMNI_DEV_REMOTE_INPUT_PORT:-$local_api_port_default}}"
+    case "$local_api_port" in
+        '' | *[!0-9]*) die "OMNI_DEV_LOCAL_API_PORT must be a number, got '$local_api_port'" ;;
     esac
-    [ "$remote_input_port" -ge 1024 ] && [ "$remote_input_port" -le 65534 ] ||
-        die "OMNI_DEV_REMOTE_INPUT_PORT must be within 1024..65534, got $remote_input_port"
-    if lsof -nP -iTCP:"$remote_input_port" -sTCP:LISTEN | grep -q .; then
-        die "port $remote_input_port is already in use; set OMNI_DEV_REMOTE_INPUT_PORT"
+    [ "$local_api_port" -ge 1024 ] && [ "$local_api_port" -le 65534 ] ||
+        die "OMNI_DEV_LOCAL_API_PORT must be within 1024..65534, got $local_api_port"
+    if lsof -nP -iTCP:"$local_api_port" -sTCP:LISTEN | grep -q .; then
+        die "port $local_api_port is already in use; set OMNI_DEV_LOCAL_API_PORT"
     fi
     local dev_home="${VOXT_DEV_HOME:-$dev_home_default}"
     local model_root="$dev_home/Library/Application Support/Voxt/model-storage"
@@ -262,8 +262,8 @@ run() {
     # isolates the app's file data: database, history and models. No launch
     # arguments are passed, so the in-app Settings toggle and port stay
     # authoritative.
-    CFFIXED_USER_HOME="$dev_home" defaults write com.voxt.Voxt.omni.dev remoteInputServerEnabled -bool true
-    CFFIXED_USER_HOME="$dev_home" defaults write com.voxt.Voxt.omni.dev remoteInputServerPort -int "$remote_input_port"
+    CFFIXED_USER_HOME="$dev_home" defaults write com.voxt.Voxt.omni.dev localAPIServerEnabled -bool true
+    CFFIXED_USER_HOME="$dev_home" defaults write com.voxt.Voxt.omni.dev localAPIServerPort -int "$local_api_port"
 
     local backend_env=()
     if [ "${1:-}" != "--swift-backend" ]; then
@@ -272,7 +272,7 @@ run() {
     else
         backend_env=(VOXT_ASR_BACKEND=swift)
     fi
-    echo "run: Remote Input on 127.0.0.1:$remote_input_port, home $dev_home"
+    echo "run: Local API on 127.0.0.1:$local_api_port, home $dev_home"
     exec env CFFIXED_USER_HOME="$dev_home" ${backend_env[@]+"${backend_env[@]}"} \
         "$app_executable"
 }

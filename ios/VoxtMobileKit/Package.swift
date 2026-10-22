@@ -1,4 +1,5 @@
 // swift-tools-version: 6.0
+import Foundation
 import PackageDescription
 
 let package = Package(
@@ -15,7 +16,11 @@ let package = Package(
         ),
         .testTarget(
             name: "VoxtMobileKitTests",
-            dependencies: ["VoxtMobileKit"]
+            dependencies: ["VoxtMobileKit"],
+            // A copy of the Mac's recorded contract, where the repository keeps one; ContractTests
+            // read it from source.
+            exclude: FileManager.default.fileExists(atPath: Context.packageDirectory + "/Tests/VoxtMobileKitTests/Fixtures")
+                ? ["Fixtures"] : []
         ),
     ]
 )

@@ -351,8 +351,8 @@ private struct TryItStep: View {
         #if DEBUG
         if ProcessInfo.processInfo.environment["VOXT_TEST_TRY_KEYBOARD"] != nil { return true }
         #endif
-        return UserDefaults.standard.stringArray(forKey: "AppleKeyboards")?
-            .contains((Bundle.main.bundleIdentifier ?? "io.jingtao.voxtmobile") + ".keyboard") == true
+        guard let app = Bundle.main.bundleIdentifier else { return false }
+        return UserDefaults.standard.stringArray(forKey: "AppleKeyboards")?.contains(app + ".keyboard") == true
     }
 }
 

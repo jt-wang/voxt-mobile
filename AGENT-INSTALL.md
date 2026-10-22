@@ -32,7 +32,7 @@ tools/omni-dev.sh prepare
 tools/omni-dev.sh build
 ```
 
-`prepare` clones the pinned Voxt release (1.16.0, tag `voxt-v1.16.0` of sgl-project/sglang-omni) into `build/omni-source` and applies the patches in `tools/patches`. `build` builds the native speech runtime and the app.
+`prepare` clones the pinned sglang-omni commit (`ffd00d35` of sgl-project/sglang-omni) into `build/omni-source` and applies the patches in `tools/patches`. `build` builds the native speech runtime and the app.
 
 Check: the last line printed is `build: <path>/Voxt Omni Dev.app`.
 
@@ -44,9 +44,9 @@ Check: the last line printed is `build: <path>/Voxt Omni Dev.app`.
 tools/omni-dev.sh run
 ```
 
-To reuse speech models the person already has from Voxt: `VOXT_SHARED_MODELS="<their model storage>/mlx-audio" tools/omni-dev.sh run`. If port 47920 is taken, set `OMNI_DEV_REMOTE_INPUT_PORT` to a free port.
+To reuse speech models the person already has from Voxt: `VOXT_SHARED_MODELS="<their model storage>/mlx-audio" tools/omni-dev.sh run`. If port 47920 is taken, set `OMNI_DEV_LOCAL_API_PORT` to a free port.
 
-**Person:** in Voxt Omni Dev, Settings → Model: download and select a speech model and a text model (every phone mode uses both). Settings → General: turn on **Remote Input**. Recommended: Settings → Model → gear button → Memory → **Unload Delay** 10 minutes, so phone dictation doesn't wait for models to reload.
+**Person:** in Voxt Omni Dev, Settings → Model: download and select a speech model and a text model (every phone mode uses both). Settings → General → Local API: turn on **Allow other apps to dictate through Voxt**. Recommended: Settings → Model → gear button → Memory → **Unload Delay** 10 minutes, so phone dictation doesn't wait for models to reload.
 
 Check: `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:47920/v1/health` prints `401` (listening, token required).
 
@@ -60,7 +60,7 @@ ios/tools/set-team.sh
 ios/tools/check-ids.sh
 ```
 
-`set-team.sh` reads the team ID from the keychain's `Apple Development` certificate and writes `ios/Config/Signing.local.xcconfig` with `DEVELOPMENT_TEAM` and an ID prefix of the person's own (`VOXT_MOBILE_ID_PREFIX`, default `com.voxtmobile.<team in lowercase>`), because a free Apple ID can't reuse another team's app IDs or App Group. Exit 1 means there is no certificate yet: ask the person to open `ios/VoxtMobile.xcodeproj`, choose their **(Personal Team)** under VoxtMobile → Signing & Capabilities → Team and press Run once (it may fail), then run `set-team.sh` again. Exit 2 means several teams: show the list and ask which, then run `ios/tools/set-team.sh <TEAM_ID>`. `check-ids.sh` confirms the app, the keyboard and the App Group use the same prefix.
+`set-team.sh` reads the team ID from the keychain's `Apple Development` certificate and writes `ios/Config/Signing.local.xcconfig` with `DEVELOPMENT_TEAM` and an ID prefix of the person's own (`VOXT_MOBILE_ID_PREFIX`, default `com.example.voxt.<team in lowercase>`), because a free Apple ID can't reuse another team's app IDs or App Group. Exit 1 means there is no certificate yet: ask the person to open `ios/VoxtMobile.xcodeproj`, choose their **(Personal Team)** under VoxtMobile → Signing & Capabilities → Team and press Run once (it may fail), then run `set-team.sh` again. Exit 2 means several teams: show the list and ask which, then run `ios/tools/set-team.sh <TEAM_ID>`. `check-ids.sh` confirms the app, the keyboard and the App Group use the same prefix.
 
 Check: `set-team.sh` printed `Wrote …/ios/Config/Signing.local.xcconfig`, `check-ids.sh` passes, and `ios/VoxtTailcat/Artifacts/CVoxtTailcat.xcframework` exists.
 
@@ -79,7 +79,7 @@ It signs with the keychain's `Apple Development` identity (Xcode created it in s
 
 Check: the build ends with `build: <path>/Voxt Connector.app`, and the app's window opens.
 
-**Person:** in the Voxt Connector window, click **Connect**. The Connector asks Voxt for the port and token directly when both apps are signed by the same team (a released build). A Voxt Omni Dev from `tools/omni-dev.sh build` is not team-signed, so the Connector then asks for them: the person enters the **Port** and **Access token** shown in Voxt Omni Dev → Settings → General → Remote Input and clicks **Connect** again. Never read or print the token yourself.
+**Person:** in the Voxt Connector window, click **Connect**. The Connector asks Voxt for the port and token directly when both apps are signed by the same team (a released build). A Voxt Omni Dev from `tools/omni-dev.sh build` is not team-signed, so the Connector then asks for them: the person enters the **Port** and **Access token** shown in Voxt Omni Dev → Settings → General → Local API and clicks **Connect** again. Never read or print the token yourself.
 
 Check: the window shows `Connected to Voxt <version>`.
 
@@ -102,6 +102,6 @@ Check: the text appears in the field. Then tell the person: **Keep Voxt ready** 
 ## If something fails
 
 - Builds in steps 2, 4 or 5: report the last 40 lines.
-- Step 3 check prints `000`: Voxt Omni Dev isn't listening. Check that `run` is still running and printed `Remote Input on 127.0.0.1:<port>`.
-- Signing errors in Xcode: the person must be signed in under Xcode → Settings → Accounts; run `ios/tools/set-team.sh` again. This flow hasn't been tried with a free Apple ID yet; if Xcode reports a different error, show it to the person.
+- Step 3 check prints `000`: Voxt Omni Dev isn't listening. Check that `run` is still running and printed `Local API on 127.0.0.1:<port>`.
+- Signing errors in Xcode: the person must be signed in under Xcode → Settings → Accounts; run `ios/tools/set-team.sh` again. With a free Apple ID Xcode may report a different error; show it to the person.
 - The phone can't connect: Voxt Omni Dev and Voxt Connector must both be running, and both devices need internet. If the QR code expired, click **Add iPhone** again.

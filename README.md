@@ -42,7 +42,7 @@ Voxt Mobile is in private beta on TestFlight. Follow [@thejingtao](https://x.com
 
 Three pieces work together:
 
-1. **Voxt Omni Dev** on the Mac: a development build of Voxt 1.16.0 (upstream tag `voxt-v1.16.0`) with a local API for the phone. It runs your chosen speech and text models, your cleanup prompt and your dictionary, and keeps the history.
+1. **Voxt Omni Dev** on the Mac: a development build of Voxt from the pinned sglang-omni commit `ffd00d35` with a local API for the phone. It runs your chosen speech and text models, your cleanup prompt and your dictionary, and keeps the history.
 2. **Voxt Connector** on the Mac: a small app in the menu bar. When it and Voxt Omni Dev are signed by the same developer team, it gets Voxt's address and access token from Voxt directly, with no copying. It lets only the phones you added reach Voxt, over an end-to-end encrypted [Tailcat](https://github.com/tailscale/tailcat) connection, so the phone works from anywhere without a VPN app.
 3. **Voxt** on the iPhone: the app and its keyboard. iOS keyboards can't use the microphone, so the keyboard asks the app to record, and the app sends the recording to your Mac.
 
@@ -54,7 +54,7 @@ The text is inserted only if the text field still matches the one you dictated i
 
 Every app we ship is built from a public commit in this repo, and you can check which one.
 
-- **iPhone:** Settings › About › Source code shows the commit the app was built from. Open `https://github.com/jt-wang/voxt-mobile/commit/<commit>` to read that exact code. On [Releases](https://github.com/jt-wang/voxt-mobile/releases), the matching release is tagged `v1.2.3+<build>`, and its notes list the same commit and iOS build number.
+- **iPhone:** Settings › About › Source code shows the commit the app was built from. Open `https://github.com/jt-wang/voxt-mobile/commit/<commit>` to read that exact code (a build of your own links to the `VOXT_SOURCE_URL` in your `Signing.local.xcconfig`). On [Releases](https://github.com/jt-wang/voxt-mobile/releases), the matching release is tagged `v1.2.3+<build>`, and its notes list the same commit and iOS build number.
 - **Mac:** the release notes give the SHA-256 of `VoxtConnector.dmg`. Check that your download matches and that Apple notarized it:
 
   ```sh

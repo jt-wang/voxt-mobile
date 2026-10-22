@@ -79,7 +79,7 @@ public struct TextKeyboardState: Equatable, Sendable {
     public var plane: TextKeyboardPlane
 
     public static let storageKey = "textkeyboard.layouts"
-    /// The unversioned record written before 2026-10 enabled exactly these. Layouts added
+    /// The unversioned record of earlier builds enabled exactly these. Layouts added
     /// later must not make an old default look like a choice the user made.
     private static let legacyAllLayouts = ["en-QWERTY", "fr-AZERTY", "de-QWERTZ", "es-QWERTY", "ja-flick", "zh-Hant-zhuyin"]
 
@@ -89,7 +89,7 @@ public struct TextKeyboardState: Equatable, Sendable {
         shifted: Bool = false,
         plane: TextKeyboardPlane = .letters
     ) {
-        let layouts = enabled ?? Self.defaultLayouts(preferredLanguages: Locale.preferredLanguages)
+        let layouts = enabled ?? Self.defaultLayouts(preferredLanguages: Locale.preferredLanguages).filter(TextKeyboardLayoutID.offered.contains)
         self.enabled = layouts.isEmpty ? [.englishQWERTY] : layouts
         self.active = self.enabled.contains(active) ? active : self.enabled[0]
         self.shifted = shifted
@@ -98,14 +98,15 @@ public struct TextKeyboardState: Equatable, Sendable {
 
     public var layout: TextKeyboardLayout { TextKeyboardLayout.make(active) }
 
-    public static func load(from defaults: UserDefaults, preferredLanguages: [String] = Locale.preferredLanguages) -> TextKeyboardState {
+    public static func load(from defaults: UserDefaults, preferredLanguages: [String] = Locale.preferredLanguages,
+                            offered: [TextKeyboardLayoutID] = TextKeyboardLayoutID.offered) -> TextKeyboardState {
         guard let data = defaults.data(forKey: storageKey),
               let record = try? JSONDecoder().decode(Record.self, from: data) else {
-            return TextKeyboardState(enabled: defaultLayouts(preferredLanguages: preferredLanguages))
+            return TextKeyboardState(enabled: defaultLayouts(preferredLanguages: preferredLanguages).filter(offered.contains))
         }
         let enabled = record.version == nil && record.enabled == legacyAllLayouts
             ? defaultLayouts(preferredLanguages: preferredLanguages).map(\.rawValue) : record.enabled
-        let resolved = resolve(enabledRaw: enabled, activeRaw: record.active)
+        let resolved = resolve(enabledRaw: enabled, activeRaw: record.active, offered: offered)
         return TextKeyboardState(enabled: resolved.enabled, active: resolved.active)
     }
 
@@ -141,16 +142,17 @@ public struct TextKeyboardState: Equatable, Sendable {
         active = saved.active
     }
 
-    public static func resolve(enabledRaw: [String], activeRaw: String) -> (enabled: [TextKeyboardLayoutID], active: TextKeyboardLayoutID) {
+    public static func resolve(enabledRaw: [String], activeRaw: String,
+                               offered: [TextKeyboardLayoutID] = TextKeyboardLayoutID.offered) -> (enabled: [TextKeyboardLayoutID], active: TextKeyboardLayoutID) {
         var seen = Set<TextKeyboardLayoutID>()
-        let enabled = enabledRaw.compactMap(TextKeyboardLayoutID.init(rawValue:)).filter { seen.insert($0).inserted }
+        let enabled = enabledRaw.compactMap(TextKeyboardLayoutID.init(rawValue:)).filter { offered.contains($0) && seen.insert($0).inserted }
         let kept = enabled.isEmpty ? [TextKeyboardLayoutID.englishQWERTY] : enabled
         let active = TextKeyboardLayoutID(rawValue: activeRaw).flatMap { kept.contains($0) ? $0 : nil } ?? kept[0]
         return (kept, active)
     }
 
-    public mutating func enable(rawValue: String) throws {
-        guard let id = TextKeyboardLayoutID(rawValue: rawValue) else { throw TextKeyboardLayoutError.unknownLayout }
+    public mutating func enable(rawValue: String, offered: [TextKeyboardLayoutID] = TextKeyboardLayoutID.offered) throws {
+        guard let id = TextKeyboardLayoutID(rawValue: rawValue), offered.contains(id) else { throw TextKeyboardLayoutError.unknownLayout }
         if !enabled.contains(id) { enabled.append(id) }
     }
 

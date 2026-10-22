@@ -1,11 +1,18 @@
 import Foundation
-import JapaneseInput
 import KoreanInput
-import PinyinInput
 import SpanishInput
 import TypingInput
 import VoxtMobileKit
+// Japanese, pinyin and Zhuyin come from ios/InputMethods.yml; a build without it offers the rest.
+#if canImport(JapaneseInput)
+import JapaneseInput
+#endif
+#if canImport(PinyinInput)
+import PinyinInput
+#endif
+#if canImport(ZhuyinInput)
 import ZhuyinInput
+#endif
 
 /// Every typing layout this keyboard offers through the TypingInput contract.
 /// Adding a layout is one line here plus its package, which implements the TypingInput contract.
@@ -34,15 +41,28 @@ enum TypingLayouts {
         }
     }
 
+    #if canImport(PinyinInput)
     /// Picks are remembered in the App Group (Settings can clear them); fuzzy
     /// z/zh, c/ch, s/sh follows the Settings switch on every conversion.
     private static let pinyin = PinyinLayout.descriptor(
         learning: PinyinLearning(fileURL: PinyinSettings.learnedWordsURL),
         fuzzy: { PinyinSettings.fuzzy(in: UserDefaults(suiteName: DictationChannel.appGroup) ?? .standard) })
+    #endif
 
     static let registry: LayoutRegistry = {
+        var layouts = [SpanishLayout.descriptor]
+        #if canImport(JapaneseInput)
+        layouts.append(JapaneseLayout.descriptor)
+        #endif
+        #if canImport(ZhuyinInput)
+        layouts.append(ZhuyinLayout.descriptor)
+        #endif
+        layouts.append(KoreanLayout.descriptor)
+        #if canImport(PinyinInput)
+        layouts.append(pinyin)
+        #endif
         do {
-            return try LayoutRegistry([SpanishLayout.descriptor, JapaneseLayout.descriptor, ZhuyinLayout.descriptor, KoreanLayout.descriptor, pinyin])
+            return try LayoutRegistry(layouts)
         } catch {
             preconditionFailure("Duplicate typing layout id: \(error)")
         }

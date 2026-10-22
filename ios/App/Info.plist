@@ -55,7 +55,13 @@
 	</array>
 	<key>VoxtAppGroup</key>
 	<string>$(VOXT_APP_GROUP)</string>
+	<key>VoxtInputMethods</key>
+	<string>$(VOXT_INPUT_METHODS)</string>
+	<key>VoxtKeychainServicePrefix</key>
+	<string>$(VOXT_KEYCHAIN_SERVICE_PREFIX)</string>
 	<key>VoxtSourceRevision</key>
 	<string>$(VOXT_SOURCE_REVISION)</string>
+	<key>VoxtSourceURL</key>
+	<string>$(VOXT_SOURCE_URL)</string>
 </dict>
 </plist>

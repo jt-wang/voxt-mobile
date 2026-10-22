@@ -41,7 +41,11 @@ class StampTests(unittest.TestCase):
         start = text.index("pinned_revision=") + len("pinned_revision=")
         text = text[:start] + self.pinned + text[text.index("\n", start):]
         (self.repo / "tools/omni-dev.sh").write_text(text)
-        (self.repo / ".gitignore").write_text("build/\n")
+        shutil.copyfile(TOOLS / "build-connector.py", self.repo / "tools/build-connector.py")
+        config = self.repo / "mac/VoxtConnector/Config"
+        config.mkdir(parents=True)
+        shutil.copyfile(TOOLS.parent / "mac/VoxtConnector/Config/Signing.shared.xcconfig", config / "Signing.shared.xcconfig")
+        (self.repo / ".gitignore").write_text("build/\nmac/VoxtConnector/Config/Signing.local.xcconfig\n")
         git(self.repo, "init", "-q", "-b", "main")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-q", "-m", "public")
@@ -53,9 +57,10 @@ class StampTests(unittest.TestCase):
         shutil.copyfile("/usr/bin/true", self.app / "Contents/MacOS/Voxt Omni Dev")
         (self.app / "Contents/MacOS/Voxt Omni Dev").chmod(0o755)
 
-    def stamp(self):
+    def stamp(self, env=None):
+        full = {**os.environ, "OMNI_DEV_SOURCE_DIR": str(self.upstream), "VOXT_CONNECTOR_SIGNING_LOCAL": "", **(env or {})}
         return subprocess.run(["bash", str(self.repo / "tools/omni-dev.sh"), "stamp", str(self.app)], capture_output=True,
-                              text=True, timeout=120, env={**os.environ, "OMNI_DEV_SOURCE_DIR": str(self.upstream)})
+                              text=True, timeout=120, env=full)
 
     def info(self):
         return plistlib.loads((self.app / "Contents/Info.plist").read_bytes())
@@ -67,6 +72,24 @@ class StampTests(unittest.TestCase):
         self.assertEqual(self.info().get("VoxtUpstreamRevision"), self.pinned)
         verify = subprocess.run(["codesign", "--verify", "--strict", str(self.app)], capture_output=True, text=True)
         self.assertEqual(verify.returncode, 0, verify.stderr)
+
+    def test_records_the_connector_id_the_connector_is_built_with(self):
+        # Voxt Omni Dev trusts on its Connector socket exactly the ID build-connector.py gives the Connector.
+        self.assertEqual(self.stamp().returncode, 0)
+        self.assertEqual(self.info().get("VoxtConnectorBundleIdentifier"), "com.voxt.VoxtConnector")
+        (self.repo / "mac/VoxtConnector/Config/Signing.local.xcconfig").write_text(
+            "VOXT_CONNECTOR_BUNDLE_ID = com.example.official.connector\n")
+        result = self.stamp()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.info().get("VoxtConnectorBundleIdentifier"), "com.example.official.connector")
+        self.assertEqual(self.info().get("VoxtSourceRevision"), self.commit, "the private file is not a change to the source")
+        release = self.tmp / "release.xcconfig"
+        release.write_text("VOXT_CONNECTOR_BUNDLE_ID = com.example.release.connector\n")
+        self.assertEqual(self.stamp(env={"VOXT_CONNECTOR_SIGNING_LOCAL": str(release)}).returncode, 0)
+        self.assertEqual(self.info().get("VoxtConnectorBundleIdentifier"), "com.example.release.connector")
+        result = self.stamp(env={"VOXT_CONNECTOR_SIGNING_LOCAL": str(self.tmp / "missing.xcconfig")})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("VOXT_CONNECTOR_SIGNING_LOCAL", result.stderr)
 
     def test_an_uncommitted_change_leaves_the_source_commit_out(self):
         self.assertEqual(self.stamp().returncode, 0)

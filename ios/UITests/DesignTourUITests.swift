@@ -23,7 +23,7 @@ final class DesignTourUITests: XCTestCase {
         if let wav = env["VOXT_E2E_WAV"] { app.launchEnvironment["VOXT_TEST_AUDIO_FILE"] = wav }
         app.launch()
         let started = Date()
-        XCTAssertTrue(app.staticTexts["Scan the QR on your Mac"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["onboardingTitle"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["manualPairing"].exists)
         XCTAssertFalse(app.debugDescription.isEmpty)
         XCTAssertLessThan(Date().timeIntervalSince(started), 10)
@@ -76,6 +76,33 @@ final class DesignTourUITests: XCTestCase {
             return value > 0.10
         }, object: mic)
         XCTAssertEqual(XCTWaiter.wait(for: [audible], timeout: 10), .completed)
+    }
+
+    /// A fresh simulator shows two one-time iOS tips over the keyboard: "Quickly Change Keyboards"
+    /// after the first switch, and the slide-to-type tip over the first system keyboard. Continue closes either.
+    private func dismissKeyboardTip(_ app: XCUIApplication) {
+        let tip = app.staticTexts.matching(NSPredicate(format: "label == 'Quickly Change Keyboards' OR label BEGINSWITH 'Speed up your typing by sliding'")).firstMatch
+        let close = app.buttons["Continue"].firstMatch
+        if tip.waitForExistence(timeout: 1), close.exists { close.tap() }
+    }
+
+    /// Opens the fixture's text page in Safari. Safari's first cold launch on a fresh simulator can
+    /// leave the page blank or still loading over its Start Page; a reload or opening it again loads it.
+    private func openTestPage(_ safari: XCUIApplication, base: String) {
+        let field = safari.textViews["Session test"]
+        for _ in 0..<3 {
+            safari.open(URL(string: base + "/keyboard-test")!)
+            if field.waitForExistence(timeout: 15) { break }
+            let reload = safari.buttons["ReloadButton"]
+            if reload.exists { reload.tap() }
+            if field.waitForExistence(timeout: 10) { break }
+        }
+        // Safari's one-time toolbar tip takes the next tap, which would leave the field unfocused.
+        let tip = safari.staticTexts["View Bookmarks, Share Menu, and Open Tabs"]
+        if tip.waitForExistence(timeout: 2) {
+            safari.buttons["xmark.circle.fill"].firstMatch.tap()
+            XCTAssertTrue(tip.waitForNonExistence(timeout: 3))
+        }
     }
 
     private func keyboardSettings(enabled: Bool) {
@@ -141,7 +168,7 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["connectedLabel"].waitForExistence(timeout: 10))
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
@@ -153,8 +180,9 @@ final class DesignTourUITests: XCTestCase {
         }
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         if !start.exists { print(safari.debugDescription) }
         XCTAssertTrue(start.exists)
@@ -219,15 +247,16 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["connectedLabel"].waitForExistence(timeout: 10))
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
         let start = safari.buttons["Start dictation"]
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         XCTAssertTrue(start.exists)
         return (app, safari, field, start)
@@ -311,15 +340,16 @@ final class DesignTourUITests: XCTestCase {
 
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
         let start = safari.buttons["Start dictation"]
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         XCTAssertTrue(start.exists)
         // Hold past the delay, slide onto Español's pill (1st above, 2nd up-left, 3rd up-right), let go.
@@ -373,15 +403,16 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["connectedLabel"].waitForExistence(timeout: 10))
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
         let start = safari.buttons["Start dictation"]
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         start.tap()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 6))
@@ -427,7 +458,7 @@ final class DesignTourUITests: XCTestCase {
         }
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
@@ -439,8 +470,9 @@ final class DesignTourUITests: XCTestCase {
         }
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         XCTAssertTrue(start.exists)
         start.tap()
@@ -462,15 +494,16 @@ final class DesignTourUITests: XCTestCase {
     private func dictateOnceInSafari(_ app: XCUIApplication) async throws {
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
         let start = safari.buttons["Start dictation"]
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         start.tap()
         if app.wait(for: .runningForeground, timeout: 5) {
@@ -499,7 +532,7 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["connectedLabel"].waitForExistence(timeout: 10))
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
@@ -511,8 +544,9 @@ final class DesignTourUITests: XCTestCase {
         }
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         XCTAssertTrue(start.exists)
         // The tour's sequence: warm the session (handoff, back, Cancel), go Home, stay idle, come back.
@@ -553,7 +587,7 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["connectedLabel"].waitForExistence(timeout: 10))
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
@@ -565,8 +599,9 @@ final class DesignTourUITests: XCTestCase {
         }
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         XCTAssertTrue(start.exists)
         for expected in [result, result + " " + result] {
@@ -597,7 +632,7 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["connectedLabel"].waitForExistence(timeout: 10))
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
@@ -609,8 +644,9 @@ final class DesignTourUITests: XCTestCase {
         }
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         XCTAssertTrue(start.exists)
         let pen = safari.buttons["keyboardPen"]
@@ -686,7 +722,7 @@ final class DesignTourUITests: XCTestCase {
 
     func testKeyboardShowsOnlyEnabledLanguages() async throws {
         let app = XCUIApplication()
-        app.launchEnvironment = ["VOXT_TEST_RESET": "1"]
+        app.launchEnvironment = ["VOXT_TEST_RESET": "1", "VOXT_TEST_PRACTICE_FIELD": "1"]
         app.launch()
         keyboardSettings(enabled: true)
         app.activate()
@@ -699,7 +735,7 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(french.waitForExistence(timeout: 5))
         french.tap()
         XCTAssertTrue(app.buttons["removeLayout-fr-AZERTY"].waitForExistence(timeout: 3))
-        for id in ["de-QWERTZ", "es-QWERTY", "ja-flick", "zh-Hant-zhuyin"] {
+        for id in ["de-QWERTZ", "es-QWERTY", "ja-flick", "zh-Hant-zhuyin", "ko-2beolsik", "zh-Hans-pinyin"] {
             let remove = app.buttons["removeLayout-" + id]
             if remove.exists { remove.tap() }
         }
@@ -709,6 +745,7 @@ final class DesignTourUITests: XCTestCase {
         let field = app.textFields["tryField"]
         reveal(field, in: app)
         field.tap()
+        dismissKeyboardTip(app)
         let start = app.buttons["Start dictation"]
         if !start.waitForExistence(timeout: 2), app.buttons["Next keyboard"].firstMatch.exists {
             app.buttons["Next keyboard"].firstMatch.press(forDuration: 1.2)
@@ -737,6 +774,19 @@ final class DesignTourUITests: XCTestCase {
 
     /// Settings > Developer: confirmation, editing the Dictate prompt, the prompt reaching the
     /// Mac only while Developer mode is on, and reset.
+    /// Developer mode lives in Settings › Advanced.
+    private func openAdvancedSettings(_ app: XCUIApplication) {
+        let advanced = app.buttons["settingsAdvanced"]
+        reveal(advanced, in: app)
+        advanced.tap()
+        XCTAssertTrue(app.navigationBars["Advanced"].waitForExistence(timeout: 5))
+    }
+
+    private func closeAdvancedSettings(_ app: XCUIApplication) {
+        app.navigationBars["Advanced"].buttons.firstMatch.tap()
+        app.navigationBars["Settings"].buttons["Done"].tap()
+    }
+
     func testDeveloperModePromptReachesTheMacOnlyWhileOnAndResets() async throws {
         try await control(delay: 0.2)
         let app = XCUIApplication()
@@ -746,9 +796,10 @@ final class DesignTourUITests: XCTestCase {
         app.activate()
         pair(app, address: base)
         app.buttons["Settings"].tap()
+        openAdvancedSettings(app)
         let toggle = app.switches["developerModeToggle"]
-        reveal(toggle, in: app)
-        XCTAssertTrue(app.staticTexts["Turning Developer mode off keeps your custom prompts, but Voxt stops using them."].exists)
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Lets you edit the prompts Voxt sends to your Mac. Asks to confirm before it turns on."].exists)
         tapSwitch(toggle)
         let confirm = app.alerts["Turn on Developer mode?"]
         XCTAssertTrue(confirm.waitForExistence(timeout: 3))
@@ -770,12 +821,12 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["customBadge-dictate"].waitForExistence(timeout: 3))
         snap("developer-prompt-edited", app)
         app.navigationBars["Prompts"].buttons["Done"].tap()
-        app.navigationBars["Settings"].buttons["Done"].tap()
+        closeAdvancedSettings(app)
 
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         func dictateOnce() async throws -> String? {
             safari.terminate()
-            safari.open(URL(string: base + "/keyboard-test")!)
+            openTestPage(safari, base: base)
             let field = safari.textViews["Session test"]
             XCTAssertTrue(field.waitForExistence(timeout: 10))
             field.tap()
@@ -815,12 +866,12 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 5))
         app.buttons["Settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
-        reveal(toggle, in: app)
+        openAdvancedSettings(app)
         tapSwitch(toggle)
         XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 1), "turning off needs no confirmation")
         XCTAssertFalse(prompts.exists)
         snap("developer-off", app)
-        app.navigationBars["Settings"].buttons["Done"].tap()
+        closeAdvancedSettings(app)
         let sentWhileOff = try await dictateOnce()
         XCTAssertNil(sentWhileOff, "no custom prompt while Developer mode is off")
 
@@ -828,7 +879,7 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 5))
         app.buttons["Settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
-        reveal(toggle, in: app)
+        openAdvancedSettings(app)
         tapSwitch(toggle)
         XCTAssertTrue(confirm.waitForExistence(timeout: 3))
         confirm.buttons["Turn On"].tap()
@@ -863,7 +914,7 @@ final class DesignTourUITests: XCTestCase {
         app.launch()
         pair(app, address: base)
         app.buttons["Settings"].tap()
-        let titles = ["Personal dictionary", "Language variants", "Personal style"]
+        let titles = ["Writing style", "Personal dictionary", "Learn my style"]
         let rows = titles.map { app.staticTexts[$0] }
         for row in rows { XCTAssertTrue(row.waitForExistence(timeout: 5)) }
         for row in rows.dropFirst() { XCTAssertEqual(row.frame.minX, rows[0].frame.minX, accuracy: 1) }
@@ -883,15 +934,16 @@ final class DesignTourUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["connectedLabel"].waitForExistence(timeout: 10))
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
         safari.terminate()
-        safari.open(URL(string: base + "/keyboard-test")!)
+        openTestPage(safari, base: base)
         let field = safari.textViews["Session test"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
         let start = safari.buttons["Start dictation"]
         for _ in 0..<8 {
             if start.waitForExistence(timeout: 1) { break }
+            dismissKeyboardTip(safari)
             if safari.buttons["textLayout-voice"].exists { safari.buttons["textLayout-voice"].tap() }
-            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap() }
+            else if safari.buttons["Next keyboard"].firstMatch.exists { safari.buttons["Next keyboard"].firstMatch.tap(); dismissKeyboardTip(safari) }
         }
         start.tap()
         if app.wait(for: .runningForeground, timeout: 5) {
@@ -946,10 +998,11 @@ final class DesignTourUITests: XCTestCase {
     func testDesignTour() async throws {
         try await control()
         let app = XCUIApplication()
-        app.launchEnvironment = ["VOXT_TEST_RESET": "1", "VOXT_TEST_AUDIO_FILE": try XCTUnwrap(env["VOXT_E2E_WAV"])]
+        app.launchEnvironment = ["VOXT_TEST_RESET": "1", "VOXT_TEST_AUDIO_FILE": try XCTUnwrap(env["VOXT_E2E_WAV"]),
+                                 "VOXT_TEST_PRACTICE_FIELD": "1"]
         app.launch()
-        XCTAssertTrue(app.staticTexts["Scan the QR on your Mac"].waitForExistence(timeout: 5))
-        snap("pairing", app)
+        XCTAssertTrue(app.staticTexts["onboardingTitle"].waitForExistence(timeout: 5))
+        snap("onboarding", app)
         keyboardSettings(enabled: false)
         app.activate()
         pair(app, address: "http://127.0.0.1:9")
@@ -958,76 +1011,26 @@ final class DesignTourUITests: XCTestCase {
         app.activate()
         pair(app, address: base)
         XCTAssertTrue(app.descendants(matching: .any)["connectedLabel"].waitForExistence(timeout: 12))
-        XCTAssertFalse(app.staticTexts["Use Voxt in any app"].exists)
-        XCTAssertFalse(app.buttons["recordButton"].exists)
-        snap("home-top", app)
-        let lastHomeItem = app.buttons["showRecorder"]
-        for _ in 0..<5 {
-            if lastHomeItem.isHittable && lastHomeItem.frame.maxY < app.tabBars.firstMatch.frame.minY { break }
-            app.swipeUp()
-        }
-        XCTAssertLessThan(lastHomeItem.frame.maxY, app.tabBars.firstMatch.frame.minY)
         XCTAssertTrue(app.navigationBars["Voxt"].staticTexts["Voxt"].exists)
         snap("home-keyboard-enabled", app)
         app.buttons["Settings"].tap()
         XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
         snap("settings", app)
-        let literalToggle = app.switches["literalDictation"]
-        reveal(literalToggle, in: app)
-        literalToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
-        XCTAssertEqual(literalToggle.value as? String, "1")
+        // "Clean up my words" replaced the literal-dictation switch; off means literal.
+        let cleanUp = app.switches["cleanUpWords"]
+        reveal(cleanUp, in: app)
+        XCTAssertEqual(cleanUp.value as? String, "1")
+        cleanUp.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(cleanUp.value as? String, "0")
         snap("settings-literal-on", app)
-        literalToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
-        XCTAssertEqual(literalToggle.value as? String, "0")
+        cleanUp.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(cleanUp.value as? String, "1")
         app.buttons["Done"].tap()
 
-        let recorder = app.buttons["showRecorder"]
-        reveal(recorder, in: app)
-        recorder.tap()
-        let record = app.buttons["recordButton"]
-        reveal(record, in: app)
-        XCTAssertFalse(app.buttons["floatingWindowToggle"].exists)
-        snap("app-idle", app)
-        let appIdleMicY = record.frame.midY
-        record.tap()
-        label(record, equals: "Stop recording")
-        waitForVoiceLevel(record)
-        XCTAssertFalse(app.buttons["compositionMode-dictate"].isEnabled)
-        XCTAssertGreaterThan(app.buttons["cancelComposition"].frame.minY, record.frame.maxY)
-        XCTAssertEqual(record.frame.midY, appIdleMicY, accuracy: 3)
-        snap("app-recording", app)
-        record.tap()
-        XCTAssertTrue(app.staticTexts["Writing it up…"].waitForExistence(timeout: 3))
-        snap("app-processing", app)
-        XCTAssertTrue(app.staticTexts["historyText"].firstMatch.waitForExistence(timeout: 15))
-        let editLatest = app.buttons["editLatestResult"]
-        XCTAssertTrue(editLatest.exists)
-        XCTAssertGreaterThan(editLatest.frame.minX, app.staticTexts["historyText"].firstMatch.frame.midX)
-        snap("history", app)
-        app.tabBars.buttons["Home"].tap()
-        reveal(app.staticTexts["latestResultText"], in: app)
-        XCTAssertEqual(app.staticTexts["latestResultText"].label, result)
-        snap("app-completed", app)
-
-        try await control(failure: true)
-        // Returning to Home retains the recorder's scroll position.
-        reveal(record, in: app)
-        record.tap()
-        label(record, equals: "Stop recording")
-        record.tap()
-        XCTAssertTrue(app.staticTexts["Design review: simulated failure."].waitForExistence(timeout: 15))
-        XCTAssertEqual(record.value as? String, "failed")
-        XCTAssertTrue(app.buttons["retryComposition"].isHittable)
-        snap("app-failed", app)
-        try await control()
-
-        // Relaunch clears failed capture; preserves the synthetic pairing and history.
-        app.terminate()
-        app.launchEnvironment.removeValue(forKey: "VOXT_TEST_RESET")
-        app.launch()
         let field = app.textFields["tryField"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
+        dismissKeyboardTip(app)
         let start = app.buttons["Start dictation"]
         if !start.waitForExistence(timeout: 2) {
             if app.buttons["textLayout-voice"].exists {
@@ -1077,6 +1080,24 @@ final class DesignTourUITests: XCTestCase {
         let inserted = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS %@", result), object: field)
         XCTAssertEqual(XCTWaiter.wait(for: [inserted], timeout: 15), .completed)
         snap("keyboard-completed", app)
+        // The keyboard covers the tab bar; Home's bar closes it.
+        app.buttons["Hide keyboard"].tap()
+        app.tabBars.buttons["History"].tap()
+        let latest = app.staticTexts["historyText"].firstMatch
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertEqual(latest.label, result)
+        XCTAssertGreaterThan(app.buttons["editLatestResult"].frame.minX, latest.frame.midX)
+        snap("history", app)
+        app.tabBars.buttons["Home"].tap()
+        // Home scrolls far enough that its last item clears the tab bar.
+        let lastHomeItem = app.buttons["copyRecent-0"]
+        reveal(lastHomeItem, in: app)
+        XCTAssertLessThan(lastHomeItem.frame.maxY, app.tabBars.firstMatch.frame.minY)
+        snap("home-with-history", app)
+        reveal(field, in: app)
+        field.tap()
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+
         try await control(failure: true)
         start.tap()
         XCTAssertTrue(stop.waitForExistence(timeout: 5))

@@ -23,6 +23,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		460C944E06823B373617C4FD /* Signing.shared.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.shared.xcconfig; sourceTree = "<group>"; };
 		63929ACFB8B85FE78FB5E9D6 /* VoxtConnectorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoxtConnectorApp.swift; sourceTree = "<group>"; };
 		7F0833E4C56ED17D35C9E0E7 /* ConnectorOnboardingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectorOnboardingUITests.swift; sourceTree = "<group>"; };
 		8F37AA716DC3BA91780ED1AB /* VoxtConnectionKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = VoxtConnectionKit; path = ../VoxtConnectionKit; sourceTree = SOURCE_ROOT; };
@@ -45,6 +46,7 @@
 		181CEAD689FCD71BA121631C = {
 			isa = PBXGroup;
 			children = (
+				F63D509BCCEC6F7E7580706D /* Config */,
 				910996B2DBC3F4E2A3CD6C9D /* Packages */,
 				FBE5C5C7C681E759F3B3BF4D /* Sources */,
 				9DEB4AB9FBD1CD9CE0C7FB37 /* UITests */,
@@ -75,6 +77,14 @@
 				7F0833E4C56ED17D35C9E0E7 /* ConnectorOnboardingUITests.swift */,
 			);
 			path = UITests;
+			sourceTree = "<group>";
+		};
+		F63D509BCCEC6F7E7580706D /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				460C944E06823B373617C4FD /* Signing.shared.xcconfig */,
+			);
+			path = Config;
 			sourceTree = "<group>";
 		};
 		FBE5C5C7C681E759F3B3BF4D /* Sources */ = {
@@ -192,6 +202,7 @@
 /* Begin XCBuildConfiguration section */
 		06DBFC3F11B9B0ECF2B3F184 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 460C944E06823B373617C4FD /* Signing.shared.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGNING_ALLOWED = NO;
@@ -202,7 +213,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.voxtmobile.connector.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(VOXT_CONNECTOR_BUNDLE_ID).uitests";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
 				TEST_TARGET_NAME = VoxtConnector;
@@ -330,6 +341,7 @@
 		};
 		9443088B9AFB362AD3DCF588 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 460C944E06823B373617C4FD /* Signing.shared.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
@@ -343,7 +355,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.voxtmobile.connector;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(VOXT_CONNECTOR_BUNDLE_ID)";
 				PRODUCT_NAME = "Voxt Connector";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
@@ -352,6 +364,7 @@
 		};
 		B4F6CE81BFDB17708B3E51DD /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 460C944E06823B373617C4FD /* Signing.shared.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGNING_ALLOWED = NO;
@@ -362,7 +375,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.voxtmobile.connector.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(VOXT_CONNECTOR_BUNDLE_ID).uitests";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
 				TEST_TARGET_NAME = VoxtConnector;
@@ -371,6 +384,7 @@
 		};
 		CE4E409546AC9778442E9A59 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 460C944E06823B373617C4FD /* Signing.shared.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
@@ -384,7 +398,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.voxtmobile.connector;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(VOXT_CONNECTOR_BUNDLE_ID)";
 				PRODUCT_NAME = "Voxt Connector";
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;

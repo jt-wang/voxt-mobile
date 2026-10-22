@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import VoxtMobileKit
 
-/// Talks to a real Voxt Remote Input server. Runs only when these are set:
+/// Talks to a real Voxt Local API server. Runs only when these are set:
 ///   VOXT_E2E_URL    e.g. https://your-mac.tailnet.ts.net:47911 or http://127.0.0.1:47910
 ///   VOXT_E2E_TOKEN  pairing token from Voxt Settings
 ///   VOXT_E2E_WAV    path to a 16 kHz mono WAV with speech

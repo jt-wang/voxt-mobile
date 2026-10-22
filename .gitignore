@@ -9,5 +9,6 @@ DerivedData/
 .swiftpm/
 xcuserdata/
 ios/Config/Signing.local.xcconfig
+mac/VoxtConnector/Config/Signing.local.xcconfig
 
 ios/VoxtTailcat/Artifacts/

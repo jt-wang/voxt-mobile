@@ -4,13 +4,13 @@ import Testing
 
 @Suite struct ServerConfigTests {
     @Test func bareHostGetsHTTPS() throws {
-        let url = try ServerConfig.normalizeBaseURL("mac.example.ts.net:8900")
-        #expect(url.absoluteString == "https://mac.example.ts.net:8900")
+        let url = try ServerConfig.normalizeBaseURL("mac.example.test:8900")
+        #expect(url.absoluteString == "https://mac.example.test:8900")
     }
 
     @Test func trimsWhitespaceAndTrailingSlash() throws {
-        let url = try ServerConfig.normalizeBaseURL("  https://mac.tail1.ts.net:8900/  ")
-        #expect(url.absoluteString == "https://mac.tail1.ts.net:8900")
+        let url = try ServerConfig.normalizeBaseURL("  https://mac.example.test:8900/  ")
+        #expect(url.absoluteString == "https://mac.example.test:8900")
     }
 
     @Test func keepsExplicitHTTPForLoopback() throws {

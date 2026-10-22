@@ -6,25 +6,36 @@ import http.server
 import json
 import os
 import pathlib
-import tempfile
 import queue
 import secrets
 import subprocess
+import tempfile
 import threading
 import urllib.parse
 import urllib.request
 
-
 PARSER = argparse.ArgumentParser()
-PARSER.add_argument("--red", action="store_true", help="return a virtual port the helper does not serve")
-PARSER.add_argument("--transport", action="store_true", help="run the native HTTP transport suite")
-PARSER.add_argument("--ui", action="store_true", help="run the simulator invitation and relaunch UI test")
-PARSER.add_argument("--phone-key", help="public key printed by the simulator's phone-key UI test")
+PARSER.add_argument(
+    "--red", action="store_true", help="return a virtual port the helper does not serve"
+)
+PARSER.add_argument(
+    "--transport", action="store_true", help="run the native HTTP transport suite"
+)
+PARSER.add_argument(
+    "--ui",
+    action="store_true",
+    help="run the simulator invitation and relaunch UI test",
+)
+PARSER.add_argument(
+    "--phone-key", help="public key printed by the simulator's phone-key UI test"
+)
 OPTIONS = PARSER.parse_args()
 if OPTIONS.ui and (OPTIONS.transport or not OPTIONS.phone_key):
     PARSER.error("--ui requires --phone-key and cannot be combined with --transport")
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DESTINATION = os.environ.get("VOXT_SIMULATOR_DESTINATION", "platform=iOS Simulator,name=iPhone 17 Pro")
+DESTINATION = os.environ.get(
+    "VOXT_SIMULATOR_DESTINATION", "platform=iOS Simulator,name=iPhone 17 Pro"
+)
 HELPER = ROOT / "build/voxt-tailcat-host/voxt-tailcat-host"
 if not HELPER.is_file():
     PARSER.error("build the Mac helper first")
@@ -65,7 +76,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self.authenticated():
             self.send_json(401, {"error": "unauthorized"})
         elif self.path == "/slow-started":
-            self.send_json(200 if SLOW_STARTED.is_set() else 425, {"started": SLOW_STARTED.is_set()})
+            self.send_json(
+                200 if SLOW_STARTED.is_set() else 425,
+                {"started": SLOW_STARTED.is_set()},
+            )
         elif self.path == "/v1/slow":
             SLOW_STARTED.set()
             threading.Event().wait(8)
@@ -74,7 +88,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
         elif self.path == "/v1/health":
-            self.send_json(200, {"ok": True, "app": "Voxt", "version": "native-fixture"})
+            self.send_json(
+                200, {"ok": True, "app": "Voxt", "version": "native-fixture"}
+            )
         else:
             self.send_json(404, {"error": "missing"})
 
@@ -90,9 +106,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif body != PAYLOAD:
                 self.send_json(400, {"error": "body"})
             else:
-                self.send_json(200, {"id": "fixture", "text": "fixture verified", "rawText": "fixture verified", "asrMs": 0})
+                self.send_json(
+                    200,
+                    {
+                        "id": "fixture",
+                        "text": "fixture verified",
+                        "rawText": "fixture verified",
+                        "asrMs": 0,
+                    },
+                )
             return
-        if self.path != "/pair" or self.headers.get("Authorization") != "Bearer " + CONTROL_TOKEN:
+        if (
+            self.path != "/pair"
+            or self.headers.get("Authorization") != "Bearer " + CONTROL_TOKEN
+        ):
             self.send_json(401, {"error": "unauthorized"})
             return
         try:
@@ -102,13 +129,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (ValueError, KeyError, TypeError):
             self.send_json(400, {"error": "request"})
             return
-        child = subprocess.Popen([str(HELPER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        child = subprocess.Popen(
+            [str(HELPER)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
         CHILDREN.append(child)
-        request = {"version": 1, "state": None, "allowedClients": [public_key], "localPort": self.server.server_port}
+        request = {
+            "version": 1,
+            "state": None,
+            "allowedClients": [public_key],
+            "localPort": self.server.server_port,
+        }
         child.stdin.write(json.dumps(request).encode() + b"\n")
         child.stdin.flush()
         replies = queue.Queue(maxsize=1)
-        threading.Thread(target=lambda: replies.put(child.stdout.readline()), daemon=True).start()
+        threading.Thread(
+            target=lambda: replies.put(child.stdout.readline()), daemon=True
+        ).start()
         try:
             reply = json.loads(replies.get(timeout=25))
             if not reply.get("address") or reply.get("port") != 48931:
@@ -117,7 +156,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(503, {"error": "helper"})
             return
         ADDRESSES.append(reply["address"])
-        self.send_json(200, {"address": reply["address"], "port": reply["port"] + int(OPTIONS.red), "token": HTTP_TOKEN})
+        self.send_json(
+            200,
+            {
+                "address": reply["address"],
+                "port": reply["port"] + int(OPTIONS.red),
+                "token": HTTP_TOKEN,
+            },
+        )
 
 
 SERVER = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -128,48 +174,104 @@ if OPTIONS.ui:
     pair = urllib.request.Request(
         f"http://127.0.0.1:{SERVER.server_port}/pair",
         data=json.dumps({"publicKey": OPTIONS.phone_key}).encode(),
-        headers={"Authorization": "Bearer " + CONTROL_TOKEN, "Content-Type": "application/json"},
+        headers={
+            "Authorization": "Bearer " + CONTROL_TOKEN,
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     with urllib.request.urlopen(pair, timeout=35) as response:
         details = json.load(response)
-    INVITATION = "voxtmobile://pair?" + urllib.parse.urlencode({
-        "tailcat": details["address"], "port": details["port"],
-        "token": details["token"], "client": OPTIONS.phone_key,
-    })
-    ENVIRONMENT["TEST_RUNNER_VOXT_INVITATION_FIXTURE_URL"] = f"http://127.0.0.1:{SERVER.server_port}/invitation"
+    INVITATION = "voxtmobile://pair?" + urllib.parse.urlencode(
+        {
+            "tailcat": details["address"],
+            "port": details["port"],
+            "token": details["token"],
+            "client": OPTIONS.phone_key,
+        }
+    )
+    ENVIRONMENT["TEST_RUNNER_VOXT_INVITATION_FIXTURE_URL"] = (
+        f"http://127.0.0.1:{SERVER.server_port}/invitation"
+    )
     COMMAND = [
-        "xcodebuild", "test", "-project", "ios/VoxtMobile.xcodeproj", "-scheme", "VoxtMobile",
-        "-destination", DESTINATION,
-        "-derivedDataPath", "build/mobile-parity", "-parallel-testing-enabled", "NO",
-        "-collect-test-diagnostics", "never",
+        "xcodebuild",
+        "test",
+        "-project",
+        "ios/VoxtMobile.xcodeproj",
+        "-scheme",
+        "VoxtMobile",
+        "-destination",
+        DESTINATION,
+        "-derivedDataPath",
+        "build/mobile-parity",
+        "-parallel-testing-enabled",
+        "NO",
+        "-collect-test-diagnostics",
+        "never",
         "-only-testing:VoxtMobileUITests/PreferencesUITests/testLiveTailcatInvitationFromLocalFixture",
     ]
 elif OPTIONS.transport:
     ENVIRONMENT["VOXT_TAILCAT_FIXTURE_URL"] = f"http://127.0.0.1:{SERVER.server_port}"
     ENVIRONMENT["VOXT_FIXTURE_CONTROL_TOKEN"] = CONTROL_TOKEN
-    COMMAND = ["swift", "test", "--package-path", "ios/VoxtTailcat", "--disable-keychain", "--disable-netrc", "--filter", "NativeTransportTests"]
+    COMMAND = [
+        "swift",
+        "test",
+        "--package-path",
+        "ios/VoxtTailcat",
+        "--disable-keychain",
+        "--disable-netrc",
+        "--filter",
+        "NativeTransportTests",
+    ]
 else:
-    ENVIRONMENT["TEST_RUNNER_VOXT_TAILCAT_FIXTURE_URL"] = f"http://127.0.0.1:{SERVER.server_port}"
+    ENVIRONMENT["TEST_RUNNER_VOXT_TAILCAT_FIXTURE_URL"] = (
+        f"http://127.0.0.1:{SERVER.server_port}"
+    )
     ENVIRONMENT["TEST_RUNNER_VOXT_FIXTURE_CONTROL_TOKEN"] = CONTROL_TOKEN
     COMMAND = [
-        "xcodebuild", "test", "-project", "ios/VoxtMobile.xcodeproj", "-scheme", "VoxtMobile",
-        "-destination", DESTINATION,
-        "-derivedDataPath", "build/mobile-parity", "-parallel-testing-enabled", "NO",
-        "-collect-test-diagnostics", "never", "-only-testing:VoxtMobileTests/AppModelNativeTailcatTests",
+        "xcodebuild",
+        "test",
+        "-project",
+        "ios/VoxtMobile.xcodeproj",
+        "-scheme",
+        "VoxtMobile",
+        "-destination",
+        DESTINATION,
+        "-derivedDataPath",
+        "build/mobile-parity",
+        "-parallel-testing-enabled",
+        "NO",
+        "-collect-test-diagnostics",
+        "never",
+        "-only-testing:VoxtMobileTests/AppModelNativeTailcatTests",
     ]
 kind = "ui" if OPTIONS.ui else "transport" if OPTIONS.transport else "mobile"
-LOG = pathlib.Path(tempfile.gettempdir()) / ("voxt-tailcat-" + kind + "-host-" + ("red" if OPTIONS.red else "green") + ".log")
+LOG = pathlib.Path(tempfile.gettempdir()) / (
+    "voxt-tailcat-" + kind + "-host-" + ("red" if OPTIONS.red else "green") + ".log"
+)
 try:
     with LOG.open("w") as output:
-        result = subprocess.run(COMMAND, cwd=ROOT, env=ENVIRONMENT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=480)
-        filtered = result.stdout.replace(CONTROL_TOKEN, "[control-token]").replace(HTTP_TOKEN, "[http-token]")
+        result = subprocess.run(
+            COMMAND,
+            cwd=ROOT,
+            env=ENVIRONMENT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=480,
+        )
+        filtered = result.stdout.replace(CONTROL_TOKEN, "[control-token]").replace(
+            HTTP_TOKEN, "[http-token]"
+        )
         for address in ADDRESSES:
             filtered = filtered.replace(address, "[tailcat-address]")
         if INVITATION:
             filtered = filtered.replace(INVITATION, "[invitation]")
         output.write(filtered)
-    print("transport test exit:" if OPTIONS.transport else "simulator test exit:", result.returncode)
+    print(
+        "transport test exit:" if OPTIONS.transport else "simulator test exit:",
+        result.returncode,
+    )
     raise SystemExit(result.returncode)
 finally:
     SERVER.shutdown()

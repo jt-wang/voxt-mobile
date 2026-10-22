@@ -94,6 +94,16 @@ import Testing
     #expect(!model.opensSettingsAtLaunch)
 }
 
+/// When Voxt doesn't answer, the status names Voxt's own setting: Settings › General › Local API.
+@MainActor @Test func unreachableVoxtNamesItsLocalAPISetting() async {
+    let model = ConnectorAppModel(runtimeURL: URL(fileURLWithPath: "/missing"), store: EmptyStore(), health: { _, _ in
+        throw LocalInferenceClient.Failure.unavailable
+    }, preferences: TestPreferences())
+    model.token = "fixture"
+    await model.connect()
+    #expect(model.statusText == "Could not reach Voxt. Open it and, in Settings › General › Local API, turn on “Allow other apps to dictate through Voxt”.")
+}
+
 /// Answers authorize() with a scripted result once the test releases it.
 private final class FakeAuthorizer: ConnectorAuthorizing, @unchecked Sendable {
     private let lock = NSLock()

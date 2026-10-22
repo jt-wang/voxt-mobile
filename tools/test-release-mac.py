@@ -108,7 +108,7 @@ class SignTests(unittest.TestCase):
     def test_checks_a_code_requirement(self):
         good = self.sign("--requirement", 'identifier "com.example.connector"')
         self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
-        bad = self.sign("--requirement", 'identifier "com.voxtmobile.connector"')
+        bad = self.sign("--requirement", 'identifier "com.voxt.VoxtConnector"')
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("does not satisfy", bad.stdout + bad.stderr)
 

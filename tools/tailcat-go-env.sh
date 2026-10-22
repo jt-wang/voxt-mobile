@@ -12,7 +12,7 @@ tailcat_prepare_go() {
   cache="${VOXT_TAILCAT_GO_CACHE:-$root/build/voxt-tailcat-go}"
   mkdir -p "$cache/modcache" "$cache/gocache" "$cache/gopath"
 
-  system_go="$(command -v go)"
+  system_go="$(command -v go || true)" # under set -e a failed lookup would exit before the message
   if [[ -z "$system_go" || ! -x "$system_go" ]]; then
     echo "system go was not found on PATH" >&2
     return 1
@@ -30,9 +30,10 @@ tailcat_prepare_go() {
   export GOPATH="$cache/gopath"
   export GOTOOLCHAIN="go${required}"
 
-  goroot="$(cd "$module_dir" && "$system_go" env GOROOT)"
+  # Go downloads the go.mod toolchain through GOPROXY; offline it fails within about 30 s.
+  goroot="$(cd "$module_dir" && "$system_go" env GOROOT)" || goroot=""
   if [[ ! -x "$goroot/bin/go" ]]; then
-    echo "go${required} toolchain was not found" >&2
+    echo "go${required} toolchain was not found: install Go ${required} or later, or let go download it (needs network)" >&2
     return 1
   fi
   version="$("$goroot/bin/go" version)"

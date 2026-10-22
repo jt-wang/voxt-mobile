@@ -1,8 +1,9 @@
 import XCTest
 
-/// Try it with the real Voxt keyboard (Full Access on) and a fake Mac
-/// (tools/design-tour-fixture.py). Runs only when the test runner gets
-/// VOXT_E2E_URL, VOXT_E2E_TOKEN and VOXT_E2E_WAV (prefix TEST_RUNNER_ for xcodebuild).
+/// Try it with the real Voxt keyboard (Full Access on) and a Mac: tools/design-tour-fixture.py, or
+/// Voxt's Local API. Runs only when the test runner gets VOXT_E2E_URL, VOXT_E2E_TOKEN and
+/// VOXT_E2E_WAV (prefix TEST_RUNNER_ for xcodebuild); VOXT_E2E_EXPECT is text the result must
+/// contain, the fixture's reply by default.
 @MainActor
 final class TryItEndToEndUITests: XCTestCase {
     private var env: [String: String] { ProcessInfo.processInfo.environment }
@@ -13,11 +14,12 @@ final class TryItEndToEndUITests: XCTestCase {
     }
 
     func testTryItPointsAtTheMicThenFinishesAfterARealDictation() throws {
-        enableVoxtKeyboardWithFullAccess()
+        // On a fresh simulator Settings lists the Voxt keyboard only after Voxt has been opened once.
         let app = XCUIApplication()
         app.launchEnvironment = ["VOXT_TEST_RESET": "1"]
         app.launch()
         app.terminate()
+        enableVoxtKeyboardWithFullAccess()
         app.launchEnvironment = [
             "VOXT_TEST_SERVER": String(data: try JSONSerialization.data(withJSONObject: [
                 "baseURL": try XCTUnwrap(env["VOXT_E2E_URL"]), "token": try XCTUnwrap(env["VOXT_E2E_TOKEN"]),
@@ -46,7 +48,8 @@ final class TryItEndToEndUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["That's it. Use it in any app."].waitForExistence(timeout: 60))
         let field = app.textFields["tryItField"].exists ? app.textFields["tryItField"] : app.textViews["tryItField"]
-        XCTAssertTrue((field.value as? String ?? "").contains("design review dictation"), "Field holds: \(field.value ?? "nil")")
+        let expected = env["VOXT_E2E_EXPECT"] ?? "design review dictation"
+        XCTAssertTrue((field.value as? String ?? "").contains(expected), "Field holds: \(field.value ?? "nil")")
         shot("try-it-done-real-keyboard", app)
 
         app.buttons["onboardingNext"].tap()
@@ -57,11 +60,20 @@ final class TryItEndToEndUITests: XCTestCase {
 
     // MARK: Helpers (same steps as DictationFlowUITests)
 
+    /// A fresh simulator shows two one-time iOS tips over the keyboard: "Quickly Change Keyboards"
+    /// after the first switch, and the slide-to-type tip over the first system keyboard. Continue closes either.
+    private func dismissKeyboardTip(_ app: XCUIApplication) {
+        let tip = app.staticTexts.matching(NSPredicate(format: "label == 'Quickly Change Keyboards' OR label BEGINSWITH 'Speed up your typing by sliding'")).firstMatch
+        let close = app.buttons["Continue"].firstMatch
+        if tip.waitForExistence(timeout: 1), close.exists { close.tap() }
+    }
+
     private func switchToVoxt(_ app: XCUIApplication, mic: XCUIElement) {
         let next = app.buttons.matching(NSPredicate(format: "label == 'Next keyboard' OR identifier == 'Next keyboard'")).firstMatch
         var switches = 0
         while !mic.waitForExistence(timeout: 2), switches < 6, next.exists {
             next.tap()
+            dismissKeyboardTip(app)
             switches += 1
         }
         if !mic.exists, next.exists {

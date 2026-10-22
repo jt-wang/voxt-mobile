@@ -1,0 +1,388 @@
+diff --git a/Voxt/Mobile/contract/README.md b/Voxt/Mobile/contract/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e002dae54a4956657532f9353b9bb5e7f1f473b
+--- /dev/null
++++ b/Voxt/Mobile/contract/README.md
+@@ -0,0 +1,11 @@
++# Local API contract
++
++Example JSON of the Local API ([`Voxt/docs/LocalAPI.md`](../../docs/LocalAPI.md)), shared by both sides:
++`Voxt/VoxtTests/LocalAPIContractTests.swift` checks them against Voxt's real output, and Voxt Mobile's
++tests decode them. Run the Voxt test with `VOXT_CONTRACT_RECORD=1` to rewrite them after a schema change.
++
++- `id`, `asrMs` and `enhanceMs` hold fixed values; real responses differ on every request.
++- `compose-request.json` has every option field Voxt reads. Voxt ignores option keys it does not read,
++  so a client may send its own (Voxt Mobile also sends `literalDictation`); compare a client's body
++  with the fixture on the fixture's keys.
++- `errors.json` maps a name to the status and `{"error": "…"}` body of one failure.
+diff --git a/Voxt/Mobile/contract/capabilities.json b/Voxt/Mobile/contract/capabilities.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7900b8e84cea7e21be5388f9e117038018dbbf0
+--- /dev/null
++++ b/Voxt/Mobile/contract/capabilities.json
+@@ -0,0 +1,37 @@
++{
++  "api" : {
++    "major" : 1,
++    "minor" : 0
++  },
++  "app" : "Voxt",
++  "audio" : {
++    "contentTypes" : [
++      "audio/aac",
++      "audio/m4a",
++      "audio/mp4",
++      "audio/mpeg",
++      "audio/wav",
++      "audio/wave",
++      "audio/x-caf",
++      "audio/x-m4a",
++      "audio/x-wav"
++    ],
++    "maxBodyBytes" : 26214400
++  },
++  "endpoints" : [
++    "health",
++    "capabilities",
++    "dictations",
++    "compose",
++    "compose/prompts"
++  ],
++  "locations" : {
++    "text" : "local",
++    "transcription" : "local"
++  },
++  "models" : {
++    "text" : "ready",
++    "transcription" : "ready"
++  },
++  "version" : "1.16.0"
++}
+diff --git a/Voxt/Mobile/contract/compose-not-applied.json b/Voxt/Mobile/contract/compose-not-applied.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..16a553abf67e343b60d5a31e1e6fd63ac6ee4a8f
+--- /dev/null
++++ b/Voxt/Mobile/contract/compose-not-applied.json
+@@ -0,0 +1,11 @@
++{
++  "asrMs" : 531,
++  "enhanced" : false,
++  "enhanceMs" : 412,
++  "id" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
++  "message" : "Couldn't apply that edit",
++  "mode" : "edit",
++  "rawText" : "um tomorrow at three we meet in room four",
++  "status" : "not_applied",
++  "text" : "See you at the cafe."
++}
+diff --git a/Voxt/Mobile/contract/compose-request.json b/Voxt/Mobile/contract/compose-request.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa58c223254e0548fb852f5d7cc10f9d0f8d8e74
+--- /dev/null
++++ b/Voxt/Mobile/contract/compose-request.json
+@@ -0,0 +1,20 @@
++{
++  "audio": "AQID",
++  "contentType": "audio/wav",
++  "language": "auto",
++  "options": {
++    "contextAfter": "",
++    "contextBefore": "Meeting notes:",
++    "languageVariants": [
++      "zh-Hans"
++    ],
++    "mode": "translate",
++    "selectedText": "",
++    "style": "automatic",
++    "styleExamples": [],
++    "targetLanguage": "zh-Hans",
++    "vocabulary": [
++      "Voxt"
++    ]
++  }
++}
+diff --git a/Voxt/Mobile/contract/compose-response.json b/Voxt/Mobile/contract/compose-response.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..95028e2d17a57a7bcbd155fecdf9b52726404a6d
+--- /dev/null
++++ b/Voxt/Mobile/contract/compose-response.json
+@@ -0,0 +1,9 @@
++{
++  "asrMs" : 531,
++  "enhanced" : true,
++  "enhanceMs" : 412,
++  "id" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
++  "mode" : "translate",
++  "rawText" : "um tomorrow at three we meet in room four",
++  "text" : "Tomorrow at three, we meet in room four."
++}
+diff --git a/Voxt/Mobile/contract/dictation-response.json b/Voxt/Mobile/contract/dictation-response.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..749d338b6064e9bd0bd4bf7a5ecdbfaf1ccc240c
+--- /dev/null
++++ b/Voxt/Mobile/contract/dictation-response.json
+@@ -0,0 +1,9 @@
++{
++  "asrMs" : 531,
++  "enhanced" : true,
++  "enhanceMs" : 412,
++  "id" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
++  "mode" : "dictate",
++  "rawText" : "um tomorrow at three we meet in room four",
++  "text" : "Tomorrow at three, we meet in room four."
++}
+diff --git a/Voxt/Mobile/contract/errors.json b/Voxt/Mobile/contract/errors.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..21c83c1d545108a0fb2e29fa15370a3c3d03d2fe
+--- /dev/null
++++ b/Voxt/Mobile/contract/errors.json
+@@ -0,0 +1,44 @@
++{
++  "badRequest" : {
++    "body" : {
++      "error" : "The request has no audio."
++    },
++    "status" : 400
++  },
++  "cloudModel" : {
++    "body" : {
++      "error" : "Your Mac is set to a cloud model."
++    },
++    "status" : 403
++  },
++  "noSpeech" : {
++    "body" : {
++      "error" : "No speech detected."
++    },
++    "status" : 422
++  },
++  "notFound" : {
++    "body" : {
++      "error" : "Unknown path."
++    },
++    "status" : 404
++  },
++  "unauthorized" : {
++    "body" : {
++      "error" : "Missing or wrong access token."
++    },
++    "status" : 401
++  },
++  "unsupportedAudio" : {
++    "body" : {
++      "error" : "Send audio/wav or audio/mp4."
++    },
++    "status" : 415
++  },
++  "wrongMethod" : {
++    "body" : {
++      "error" : "Use POST."
++    },
++    "status" : 405
++  }
++}
+diff --git a/Voxt/Mobile/contract/health.json b/Voxt/Mobile/contract/health.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..106334fe17fa0478e63ddd45b0ba09873bbba712
+--- /dev/null
++++ b/Voxt/Mobile/contract/health.json
+@@ -0,0 +1,5 @@
++{
++  "app" : "Voxt",
++  "ok" : true,
++  "version" : "1.16.0"
++}
+diff --git a/Voxt/VoxtTests/LocalAPIContractTests.swift b/Voxt/VoxtTests/LocalAPIContractTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9abb8177a1a92aa59744de9e21b25e9f183257c
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIContractTests.swift
+@@ -0,0 +1,166 @@
++// LocalAPIContractTests.swift
++// Checks the Local API's JSON against the fixtures in Voxt/Mobile/contract, which the Voxt Mobile
++// tests decode too, so a schema change that forgets one side fails a test on that side.
++// Run with VOXT_CONTRACT_RECORD=1 to rewrite the fixtures from the current output.
++
++import XCTest
++@testable import Voxt
++
++@MainActor
++final class LocalAPIContractTests: XCTestCase {
++    private static let contract = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
++        .appendingPathComponent("../Mobile/contract", isDirectory: true).standardizedFileURL
++    private static let recording = ProcessInfo.processInfo.environment["VOXT_CONTRACT_RECORD"] == "1"
++    /// Values that differ on every run, fixed in the fixtures.
++    private static let stable: [String: Any] = ["id": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", "asrMs": 531, "enhanceMs": 412]
++
++    private let token = "contract-token"
++    private var directory: URL!
++
++    override func setUp() async throws {
++        directory = FileManager.default.temporaryDirectory.appendingPathComponent("LocalAPIContractTests-\(UUID().uuidString)")
++        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++    }
++
++    override func tearDown() async throws {
++        try? FileManager.default.removeItem(at: directory)
++    }
++
++    private func pipeline(transcript: String = "um tomorrow at three we meet in room four",
++                          composed: @escaping (String, LocalAPIComposeOptions) async throws -> String = { _, _ in
++                              "Tomorrow at three, we meet in room four."
++                          }) -> LocalAPIDictationPipeline {
++        let pipeline = LocalAPIDictationPipeline(
++            temporaryDirectory: directory, busyReason: { nil }, isReadableAudio: { _ in true },
++            transcribe: { _, _ in transcript }, enhance: { _ in "Tomorrow at three, we meet in room four." },
++            finalize: { LocalAPIFinalText(text: $0) }, record: { _ in })
++        pipeline.composeHandler = composed
++        return pipeline
++    }
++
++    private func handler(locations: LocalAPIModelLocations = .init(transcription: .local, text: .local),
++                         pipeline: LocalAPIDictationPipeline? = nil) -> LocalAPIServer.Handler {
++        let pipeline = pipeline ?? self.pipeline()
++        return LocalAPIRequestHandler.make(
++            router: LocalAPIRouter(token: token, maxBodyBytes: LocalAPISettings.maxBodyBytes),
++            version: "1.16.0",
++            modelStatus: { LocalAPIModelStatus(transcription: .ready, text: .ready) },
++            modelLocations: { locations },
++            dictate: { await pipeline.run($0) },
++            compose: { await pipeline.runCompose($0) })
++    }
++
++    private func request(_ method: String, _ path: String, contentType: String? = nil, body: Data = Data(),
++                         token: String? = nil, headers: [String: String] = [:]) -> LocalAPIHTTPRequest {
++        var all = headers
++        all["authorization"] = "Bearer \(token ?? self.token)"
++        if let contentType { all["content-type"] = contentType }
++        return LocalAPIHTTPRequest(method: method, path: path, headers: all, body: body)
++    }
++
++    private func fixture(_ name: String) throws -> Any {
++        try JSONSerialization.jsonObject(with: Data(contentsOf: Self.contract.appendingPathComponent(name)))
++    }
++
++    private func stabilized(_ object: Any) -> Any {
++        guard var fields = object as? [String: Any] else { return object }
++        for (key, value) in Self.stable where fields[key] != nil { fields[key] = value }
++        return fields
++    }
++
++    /// The response body equals the fixture, apart from the values in `stable`.
++    private func check(_ response: LocalAPIHTTPResponse, against name: String, file: StaticString = #filePath, line: UInt = #line) throws {
++        let actual = stabilized(try JSONSerialization.jsonObject(with: response.body))
++        try check(actual, against: name, file: file, line: line)
++    }
++
++    private func check(_ actual: Any, against name: String, file: StaticString = #filePath, line: UInt = #line) throws {
++        if Self.recording {
++            try FileManager.default.createDirectory(at: Self.contract, withIntermediateDirectories: true)
++            var data = try JSONSerialization.data(withJSONObject: actual, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
++            data.append(0x0A)
++            try data.write(to: Self.contract.appendingPathComponent(name))
++        }
++        XCTAssertEqual(actual as? NSDictionary, try fixture(name) as? NSDictionary, name, file: file, line: line)
++    }
++
++    private func composeBody() throws -> Data {
++        try Data(contentsOf: Self.contract.appendingPathComponent("compose-request.json"))
++    }
++
++    func testHealth() async throws {
++        try check(await handler()(request("GET", "/v1/health")), against: "health.json")
++    }
++
++    func testCapabilities() async throws {
++        try check(await handler()(request("GET", "/v1/capabilities")), against: "capabilities.json")
++    }
++
++    func testDictationResponse() async throws {
++        let response = await handler()(request("POST", "/v1/dictations", contentType: "audio/wav", body: Data([1, 2, 3])))
++        XCTAssertEqual(response.status, 200)
++        try check(response, against: "dictation-response.json")
++    }
++
++    func testComposeRequestIsAcceptedAsWritten() throws {
++        let route = LocalAPIRouter(token: token, maxBodyBytes: LocalAPISettings.maxBodyBytes)
++            .route(request("POST", "/v1/compose", contentType: "application/json", body: try composeBody()))
++        guard case let .compose(compose) = route else { return XCTFail("compose-request.json was refused: \(route)") }
++        XCTAssertEqual(compose.options.mode, .translate)
++        XCTAssertEqual(compose.options.targetLanguage, "zh-Hans")
++        XCTAssertEqual(compose.options.vocabulary, ["Voxt"])
++        XCTAssertEqual(compose.language, .request(nil))
++        XCTAssertEqual(compose.options.styleExamples, [])
++        let options = try XCTUnwrap((try JSONSerialization.jsonObject(with: try composeBody()) as? [String: Any])?["options"] as? [String: Any])
++        XCTAssertEqual((options["styleExamples"] as? [Any])?.count, 0, "the phone always sends styleExamples")
++    }
++
++    /// The README next to the fixtures promises this: option keys Voxt does not read are ignored, so a
++    /// client may send its own (Voxt Mobile sends literalDictation, which only the phone uses).
++    func testComposeIgnoresOptionKeysVoxtDoesNotRead() throws {
++        var body = try JSONSerialization.jsonObject(with: try composeBody()) as! [String: Any]
++        var options = body["options"] as! [String: Any]
++        options["literalDictation"] = false
++        options["somethingNew"] = ["nested": 1]
++        body["options"] = options
++        let route = LocalAPIRouter(token: token, maxBodyBytes: LocalAPISettings.maxBodyBytes)
++            .route(request("POST", "/v1/compose", contentType: "application/json", body: try JSONSerialization.data(withJSONObject: body)))
++        guard case .compose = route else { return XCTFail("unknown option keys were refused: \(route)") }
++        let readme = try String(contentsOf: Self.contract.appendingPathComponent("README.md"), encoding: .utf8)
++        XCTAssertTrue(readme.contains("ignores option keys it does not read"))
++    }
++
++    func testComposeResponses() async throws {
++        let body = try composeBody()
++        let applied = await handler()(request("POST", "/v1/compose", contentType: "application/json", body: body))
++        XCTAssertEqual(applied.status, 200)
++        try check(applied, against: "compose-response.json")
++
++        var edit = try JSONSerialization.jsonObject(with: body) as! [String: Any]
++        edit["options"] = ["mode": "edit", "selectedText": "See you at the cafe."]
++        let notApplied = await handler(pipeline: pipeline { _, _ in throw LocalAPIComposePrompt.EditNotApplied() })(
++            request("POST", "/v1/compose", contentType: "application/json", body: try JSONSerialization.data(withJSONObject: edit)))
++        XCTAssertEqual(notApplied.status, 200)
++        try check(notApplied, against: "compose-not-applied.json")
++    }
++
++    func testErrors() async throws {
++        let compose = try composeBody()
++        let cases: [(String, LocalAPIServer.Handler, LocalAPIHTTPRequest)] = [
++            ("badRequest", handler(), request("POST", "/v1/dictations", contentType: "audio/wav")),
++            ("unauthorized", handler(), request("GET", "/v1/health", token: "wrong")),
++            ("cloudModel", handler(locations: .init(transcription: .remote, text: .local)),
++             request("POST", "/v1/compose", contentType: "application/json", body: compose, headers: ["x-voxt-model-policy": "local-only"])),
++            ("notFound", handler(), request("GET", "/v1/nothing")),
++            ("wrongMethod", handler(), request("GET", "/v1/dictations")),
++            ("unsupportedAudio", handler(), request("POST", "/v1/dictations", contentType: "text/plain", body: Data([1]))),
++            ("noSpeech", handler(pipeline: pipeline(transcript: "  ")), request("POST", "/v1/dictations", contentType: "audio/wav", body: Data([1]))),
++        ]
++        var errors: [String: Any] = [:]
++        for (name, handler, request) in cases {
++            let response = await handler(request)
++            errors[name] = ["status": response.status, "body": try JSONSerialization.jsonObject(with: response.body)]
++        }
++        try check(errors, against: "errors.json")
++    }
++}
+diff --git a/Voxt/docs/LocalAPI.md b/Voxt/docs/LocalAPI.md
+index 085fa07642a0a222a61d86ac0bbf659cd4587091..c6cfa09c887d47e8c36283370857f351406f0a9c 100644
+--- a/Voxt/docs/LocalAPI.md
++++ b/Voxt/docs/LocalAPI.md
+@@ -14,7 +14,7 @@ curl -H "Authorization: Bearer $VOXT_TOKEN" -H "Content-Type: audio/wav" \
+ ```
+ 
+ ```json
+-{"id":"5214EBF0-…","text":"Please send Alice fifty dollars by Friday.","rawText":"Please send Alice fifty dollars by Friday.","enhanced":false,"asrMs":531,"enhanceMs":0}
++{"id":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE","text":"Please send Alice fifty dollars by Friday.","rawText":"Please send Alice fifty dollars by Friday.","enhanced":false,"asrMs":531,"enhanceMs":0}
+ ```
+ 
+ `text` is the result after your enhancement prompt and dictionary; `rawText` is the transcript before them. This example used Qwen3-ASR 0.6B with enhancement off. The result is also saved to History with the source **Local API**.
+@@ -68,6 +68,8 @@ Every compose mode needs a working text model; without one the request fails wit
+ 
+ Model states are `ready`, `missing` (selected but not downloaded or not configured), `off` (no text model) and `unsupported` (Apple Speech cannot transcribe recorded files).
+ 
++Example requests, responses and errors live in [`Voxt/Mobile/contract`](../Mobile/contract): `LocalAPIContractTests` checks them against the real router, and Voxt Mobile's tests decode the same files.
++
+ `/v1` only gains fields and endpoints. Clients should ignore fields they do not know. A breaking change would use `/v2`.
+ 
+ ## Errors

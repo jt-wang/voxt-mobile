@@ -10,7 +10,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 dev_script="$repo_root/tools/omni-dev.sh"
 source_dir="$(mktemp -d "${TMPDIR:-/tmp}/omni-dev-smoke.XXXXXX")"
 app_executable="$repo_root/build/omni-dev/Build/Products/Debug/Voxt Omni Dev.app/Contents/MacOS/Voxt Omni Dev"
-pinned_revision=5f3a4e25dc1292f2e565ad10b37357416a07813c
+pinned_revision=ffd00d351200d4de72493d0c707154450da4f2d2
 
 export OMNI_DEV_SOURCE_DIR="$source_dir"
 trap 'rm -rf "$source_dir"' EXIT
@@ -45,7 +45,7 @@ expect_fails "usage exits non-zero" "$dev_script" definitely-not-a-subcommand
 # Usage must carry the whole documented environment block, not a truncated slice.
 usage_output="$("$dev_script" definitely-not-a-subcommand 2>&1 || true)"
 missing_usage_docs=""
-for documented_variable in OMNI_DEV_SOURCE_DIR OMNI_DEV_REMOTE_INPUT_PORT VOXT_SHARED_MODELS VOXT_DEV_HOME; do
+for documented_variable in OMNI_DEV_SOURCE_DIR OMNI_DEV_LOCAL_API_PORT VOXT_SHARED_MODELS VOXT_DEV_HOME; do
     case "$usage_output" in
         *"$documented_variable"*) ;;
         *) missing_usage_docs="$missing_usage_docs $documented_variable" ;;
@@ -79,19 +79,26 @@ else
     fail "sparse checkout holds Voxt and only the native runtime"
 fi
 
-if test -f "$source_dir/Voxt/Voxt/Core/RemoteInput/RemoteInputServer.swift" &&
-    test -f "$source_dir/Voxt/VoxtTests/RemoteInputHTTPTests.swift"; then
-    pass "Remote Input patch is applied"
+if test -f "$source_dir/Voxt/Voxt/Core/LocalAPI/LocalAPIServer.swift" &&
+    test -f "$source_dir/Voxt/VoxtTests/LocalAPIHTTPTests.swift"; then
+    pass "Local API patch is applied"
 else
-    fail "Remote Input patch is applied"
+    fail "Local API patch is applied"
 fi
 
 if test -f "$source_dir/Voxt/Voxt/Core/LLM/EnhancementLanguageGuard.swift" &&
     grep -q "EnhancementLanguageGuard" "$source_dir/Voxt/Voxt/App/TranscriptionFlow.swift" &&
-    grep -q "EnhancementLanguageGuard" "$source_dir/Voxt/Voxt/Core/RemoteInput/RemoteInputComposePrompt.swift"; then
+    grep -q "EnhancementLanguageGuard" "$source_dir/Voxt/Voxt/Core/LocalAPI/LocalAPIComposePrompt.swift"; then
     pass "language guard patches are applied"
 else
     fail "language guard patches are applied"
+fi
+
+if grep -q "hasConfiguredCaptureGraph" "$source_dir/Voxt/Voxt/Transcription/MLXTranscriber.swift" &&
+    test -f "$source_dir/Voxt/VoxtTests/MLXTranscriberIdleReleaseTests.swift"; then
+    pass "idle reclamation fix is applied"
+else
+    fail "idle reclamation fix is applied"
 fi
 
 if "$dev_script" prepare >/dev/null; then
@@ -100,10 +107,10 @@ else
     fail "prepare is idempotent"
 fi
 
-# A checkout prepared before the language guard patches existed carries only the
-# Remote Input patch; prepare adds the rest instead of asking for a fresh clone.
-for patch in omni-dictate-principles omni-remote-input-keep-language omni-keep-input-language; do
-    git -C "$source_dir" apply -R "$repo_root/tools/patches/$patch.patch"
+# A checkout prepared with only the first patch gets the rest from prepare instead
+# of needing a fresh clone.
+for patch in $(ls "$repo_root"/tools/patches/*.patch | sort -r | sed '$d'); do
+    git -C "$source_dir" apply -R "$patch"
 done
 if "$dev_script" prepare >/dev/null && test -f "$source_dir/Voxt/Voxt/Core/LLM/EnhancementLanguageGuard.swift"; then
     pass "prepare adds the later patches to a checkout with only the first"
@@ -141,7 +148,7 @@ else
     fail "prepare recovers after the tracked-file drift is undone"
 fi
 
-echo "// drifted" >>"$source_dir/Voxt/Voxt/Core/RemoteInput/RemoteInputServer.swift"
+echo "// drifted" >>"$source_dir/Voxt/Voxt/Core/LocalAPI/LocalAPIServer.swift"
 if "$dev_script" prepare >/dev/null 2>&1; then
     fail "prepare detects a modified patched file"
 else
@@ -154,30 +161,42 @@ else
     fail "prepare rebuilds the checkout from scratch after drift"
 fi
 
+# run is checked only through its refusals. Each check runs while the default port is
+# busy, so a run that misread its port would still refuse instead of launching the app;
+# the message says which port it read.
+run_refusal() {
+    local description="$1" expected="$2" output
+    shift 2
+    output="$(env "$@" "$dev_script" run 2>&1 || true)"
+    case "$output" in
+        *"$expected"*) pass "$description" ;;
+        *) fail "$description (got: $output)" ;;
+    esac
+}
+
 if [ ! -x "$app_executable" ]; then
     expect_fails "run refuses before build" "$dev_script" run
 else
-    OMNI_DEV_REMOTE_INPUT_PORT=99999 "$dev_script" run >/dev/null 2>&1 &&
-        fail "run rejects an out-of-range port" ||
-        pass "run rejects an out-of-range port"
-
-    # A busy port must be refused before anything is written or launched. run
-    # is invoked only while the port is verifiably held by this script's own
-    # listener; any doubt means skip rather than risk launching the app.
+    nc -l 127.0.0.1 47920 >/dev/null 2>&1 &
+    default_listener_pid=$!
     local_listener_port=54831
     nc -l 127.0.0.1 "$local_listener_port" >/dev/null 2>&1 &
     listener_pid=$!
     sleep 1
     listener_owner="$(lsof -nP -iTCP:"$local_listener_port" -sTCP:LISTEN -t 2>/dev/null || true)"
-    if kill -0 "$listener_pid" 2>/dev/null && [ "$listener_owner" = "$listener_pid" ]; then
-        OMNI_DEV_REMOTE_INPUT_PORT="$local_listener_port" "$dev_script" run >/dev/null 2>&1 &&
-            fail "run rejects a port that is already in use" ||
-            pass "run rejects a port that is already in use"
+    if ! lsof -nP -iTCP:47920 -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
+        echo "SKIP run refusals (the default port 47920 could not be held)"
+    elif ! kill -0 "$listener_pid" 2>/dev/null || [ "$listener_owner" != "$listener_pid" ]; then
+        echo "SKIP run refusals (no listener owned by this script on $local_listener_port)"
     else
-        echo "SKIP run rejects a port that is already in use (no listener owned by this script)"
+        run_refusal "run rejects an out-of-range port" "must be within 1024..65534, got 99999" OMNI_DEV_LOCAL_API_PORT=99999
+        run_refusal "run rejects a port that is already in use" "port $local_listener_port is already in use" \
+            OMNI_DEV_LOCAL_API_PORT="$local_listener_port"
+        run_refusal "run reads the old OMNI_DEV_REMOTE_INPUT_PORT name" "port $local_listener_port is already in use" \
+            OMNI_DEV_REMOTE_INPUT_PORT="$local_listener_port"
     fi
-    kill "$listener_pid" 2>/dev/null
-    wait "$listener_pid" 2>/dev/null || true
+    kill "$listener_pid" "$default_listener_pid" 2>/dev/null
+    wait "$listener_pid" "$default_listener_pid" 2>/dev/null || true
 fi
 
 echo "$failures check(s) failed"

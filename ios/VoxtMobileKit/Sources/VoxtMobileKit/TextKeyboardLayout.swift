@@ -39,6 +39,22 @@ public enum TextKeyboardLayoutID: String, Codable, CaseIterable, Sendable {
     }
 }
 
+extension TextKeyboardLayoutID {
+    /// Layouts whose package a build can leave out (ios/InputMethods.yml): their dictionaries are large.
+    static let fromOptionalPackages: Set<TextKeyboardLayoutID> = [.japaneseFlick, .zhuyin, .pinyin]
+
+    /// The layouts this build carries. It lists its optional packages in `VoxtInputMethods`
+    /// (build setting `VOXT_INPUT_METHODS`); a bundle without the key, such as a test host, has all.
+    public static func offered(info: [String: Any]?) -> [TextKeyboardLayoutID] {
+        let listKey = "VoxtInputMethods"
+        guard let listed = info?[listKey] as? String, !listed.contains("$(") else { return allCases }
+        let included = Set(listed.split(separator: " ").map(String.init))
+        return allCases.filter { !fromOptionalPackages.contains($0) || included.contains($0.rawValue) }
+    }
+
+    public static let offered = offered(info: Bundle.main.infoDictionary)
+}
+
 public enum TextKeyboardPlane: String, Sendable {
     case letters, numbers
 }

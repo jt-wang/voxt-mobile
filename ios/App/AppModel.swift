@@ -113,6 +113,9 @@ final class AppModel {
     @ObservationIgnored private var pairingConnection: PairingConnection?
     private let connectionFactory: @MainActor (ServerConfig) -> PairingConnection
     private let healthProbe: (@MainActor (ServerConfig) async throws -> VoxtClient.Health)?
+    private let capabilitiesProbe: (@MainActor (ServerConfig) async throws -> VoxtClient.Capabilities)?
+    /// Endpoints the Mac listed; nil until it answers, or when it lists none (older Voxt).
+    private(set) var macEndpoints: Set<String>?
 
     private enum Key {
         static let server = "server.config"
@@ -124,6 +127,7 @@ final class AppModel {
     init(injectedCapture: AudioCapturing? = nil, injectedDefaults: UserDefaults? = nil, injectedTokens: (any TokenStoring)? = nil, injectedNow: (() -> Date)? = nil,
          injectedHistoryExchange: (@MainActor (HistorySyncRequest) async throws -> HistorySyncResponse)? = nil,
          injectedHealthProbe: (@MainActor (ServerConfig) async throws -> VoxtClient.Health)? = nil,
+         injectedCapabilitiesProbe: (@MainActor (ServerConfig) async throws -> VoxtClient.Capabilities)? = nil,
          injectedConnectionFactory: (@MainActor (ServerConfig) -> PairingConnection)? = nil,
          injectedIdentityTokens: (any TokenStoring)? = nil,
          injectedCorrectionExchange: (@MainActor (CorrectionLearningRequest) async throws -> LearnedCorrection?)? = nil,
@@ -134,13 +138,14 @@ final class AppModel {
         beginBackgroundTask = injectedBackgroundTask
         connectionFactory = injectedConnectionFactory ?? Self.makeConnection
         healthProbe = injectedHealthProbe
+        capabilitiesProbe = injectedCapabilitiesProbe
         let defaults = injectedDefaults ?? UserDefaults(suiteName: DictationChannel.appGroup) ?? .standard
         let isInjected = injectedCapture != nil || injectedDefaults != nil || injectedTokens != nil || injectedNow != nil || injectedHistoryExchange != nil || injectedHealthProbe != nil || injectedConnectionFactory != nil || injectedIdentityTokens != nil || injectedCorrectionExchange != nil
         now = injectedNow ?? Date.init
         let tokens: any TokenStoring = injectedTokens ?? (isInjected ? TransientTokenStore() : KeychainTokenStore())
         let pairingStore = PairingStore(defaults: defaults, tokens: tokens)
         self.pairingStore = pairingStore
-        let identityTokens: any TokenStoring = injectedIdentityTokens ?? (isInjected ? TransientTokenStore() : KeychainTokenStore(service: "com.voxtmobile.app.tailcat-identity"))
+        let identityTokens: any TokenStoring = injectedIdentityTokens ?? (isInjected ? TransientTokenStore() : KeychainTokenStore(service: KeychainTokenStore.service("tailcat-identity")))
         self.tailcatIdentityStore = TailcatIdentityStore(read: { try identityTokens.read() },
                                                        write: { try identityTokens.write($0) },
                                                        generate: TailcatIdentity.generate)
@@ -194,6 +199,7 @@ final class AppModel {
         self.historyStore = TranscriptHistory(defaults: defaults)
         self.historySyncStore = HistorySyncStore(defaults: defaults)
         self.historySyncEnabled = historySyncStore.isEnabled
+        macEndpoints = MacFeatures.endpoints(in: defaults)
         self.historyRetention = historyStore.retention
         self.compositionStore = compositionStore
         let developerPrompts = DeveloperPromptStore(defaults: defaults)
@@ -473,6 +479,8 @@ final class AppModel {
         pairingConnection?.invalidate()
         pairingConnection = nil
         server = nil
+        MacFeatures.clear(in: defaults)
+        macEndpoints = nil
         resetHistorySyncPairing()
         latestText = nil
         floatingWindow?.stop()
@@ -507,6 +515,7 @@ final class AppModel {
                 }
                 guard generation == connectionGeneration, !Task.isCancelled else { return }
                 connection = .connected(version: health.version)
+                await refreshMacFeatures(server, generation: generation)
                 return
             } catch let error as URLError where attempt < attempts {
                 guard generation == connectionGeneration, !Task.isCancelled else { return }
@@ -518,6 +527,23 @@ final class AppModel {
                 return
             }
         }
+    }
+
+    /// Settings shows a feature only when the Mac serves its endpoint.
+    func macServes(_ feature: VoxtClient.Feature) -> Bool { macEndpoints?.contains(feature.rawValue) ?? true }
+
+    /// Reads which endpoints the Mac serves and shares them with the keyboard. A failed read
+    /// keeps what was known; the client still refuses an endpoint the Mac doesn't list.
+    private func refreshMacFeatures(_ server: ServerConfig, generation: UUID) async {
+        let capabilities: VoxtClient.Capabilities
+        do {
+            if let capabilitiesProbe { capabilities = try await capabilitiesProbe(server) }
+            else if healthProbe == nil, let pairingConnection { capabilities = try await pairingConnection.client().capabilities() }
+            else { return }
+        } catch { return }
+        guard generation == connectionGeneration else { return }
+        MacFeatures.save(capabilities, to: defaults)
+        macEndpoints = capabilities.endpoints
     }
 
     // MARK: Dictation

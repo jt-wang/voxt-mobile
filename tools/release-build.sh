@@ -8,9 +8,13 @@
 # Last, release-gate.py release tags the public commit v1.2.3+N (or +mac) and drafts release notes;
 # --version defaults to --tag. VOXT_RELEASE_TAGGER="Name <email>" names the tagger (it is public).
 # iOS (default) signs for App Store Connect: VOXT_TEAM_ID, VOXT_PROFILE_APP, VOXT_PROFILE_KEYBOARD
-# (provisioning profile names). Mac builds Voxt Connector (plus any --mac-app, such as Voxt Omni Dev), signs
+# (provisioning profile names), and VOXT_SIGNING_LOCAL, the official build's Signing.local.xcconfig: the
+# public source has only neutral IDs, so the release's bundle IDs and Keychain names come from that file. Mac builds Voxt Connector (plus any --mac-app, such as Voxt Omni Dev), signs
 # every app with VOXT_DEVELOPER_ID ("Developer ID Application: Name (TEAM)"), puts them on a signed DMG and
 # notarizes it with the App Store Connect key in VOXT_NOTARY_KEY, VOXT_NOTARY_KEY_ID and VOXT_NOTARY_ISSUER.
+# The Connector gets the neutral bundle ID of mac/VoxtConnector/Config/Signing.shared.xcconfig, or
+# VOXT_CONNECTOR_BUNDLE_ID from VOXT_CONNECTOR_SIGNING_LOCAL, the official build's private xcconfig, so
+# installed Connectors keep their ID; every --mac-app Voxt must trust that ID (VoxtConnectorBundleIdentifier).
 # --dry-run prepares and checks the source, then prints the build commands instead of running them.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,9 +41,12 @@ out=${out:-$root/build/release/$ref}
 [[ -n ${VOXT_RELEASE_TAGGER:-} ]] || { echo "release-build: set VOXT_RELEASE_TAGGER=\"Name <email>\" (shown on the public tag)" >&2; exit 2; }
 if (( ios )); then
   [[ $build =~ ^[0-9]+$ ]] || { echo "release-build: --build N is required for iOS" >&2; exit 2; }
-  for name in VOXT_TEAM_ID VOXT_PROFILE_APP VOXT_PROFILE_KEYBOARD; do
+  for name in VOXT_TEAM_ID VOXT_PROFILE_APP VOXT_PROFILE_KEYBOARD VOXT_SIGNING_LOCAL; do
     [[ -n ${!name:-} ]] || { echo "release-build: set $name" >&2; exit 2; }
   done
+  [[ -f $VOXT_SIGNING_LOCAL ]] || { echo "release-build: VOXT_SIGNING_LOCAL is not a file: $VOXT_SIGNING_LOCAL" >&2; exit 2; }
+  prefix=$(sed -n 's/^VOXT_MOBILE_ID_PREFIX *= *//p' "$VOXT_SIGNING_LOCAL" | tail -1)
+  [[ -n $prefix ]] || { echo "release-build: VOXT_SIGNING_LOCAL sets no VOXT_MOBILE_ID_PREFIX" >&2; exit 2; }
 fi
 if (( mac )); then
   for name in VOXT_DEVELOPER_ID VOXT_NOTARY_KEY VOXT_NOTARY_KEY_ID VOXT_NOTARY_ISSUER; do
@@ -47,6 +54,23 @@ if (( mac )); then
   done
   [[ $VOXT_DEVELOPER_ID =~ \(([A-Z0-9]{10})\)$ ]] || { echo "release-build: VOXT_DEVELOPER_ID must end in (TEAMID)" >&2; exit 2; }
   team=${BASH_REMATCH[1]}
+  connector_id=com.voxt.VoxtConnector
+  if [[ -n ${VOXT_CONNECTOR_SIGNING_LOCAL:-} ]]; then
+    [[ -f $VOXT_CONNECTOR_SIGNING_LOCAL ]] ||
+      { echo "release-build: VOXT_CONNECTOR_SIGNING_LOCAL is not a file: $VOXT_CONNECTOR_SIGNING_LOCAL" >&2; exit 2; }
+    connector_id=$(sed -n 's|^VOXT_CONNECTOR_BUNDLE_ID *= *\([^ /]*\).*|\1|p' "$VOXT_CONNECTOR_SIGNING_LOCAL" | tail -1)
+    [[ $connector_id =~ ^[A-Za-z0-9.-]+$ ]] ||
+      { echo "release-build: VOXT_CONNECTOR_SIGNING_LOCAL sets no VOXT_CONNECTOR_BUNDLE_ID" >&2; exit 2; }
+  fi
+  for extra in ${mac_apps[@]+"${mac_apps[@]}"}; do
+    info="$extra/Contents/Info.plist"
+    case $(plutil -extract CFBundleIdentifier raw -o - "$info" 2>/dev/null) in
+      com.voxt.Voxt|com.voxt.Voxt.omni.dev)
+        trusted=$(plutil -extract VoxtConnectorBundleIdentifier raw -o - "$info" 2>/dev/null || echo com.voxt.VoxtConnector)
+        [[ $trusted == "$connector_id" ]] || { echo "release-build: $extra trusts the Connector $trusted" \
+          "(VoxtConnectorBundleIdentifier), but the Connector is built as $connector_id" >&2; exit 2; } ;;
+    esac
+  done
 fi
 check_mode=()  # the same public source, for release-gate.py check
 for (( i = 0; i < ${#mode[@]}; i += 2 )); do
@@ -77,8 +101,8 @@ if (( ios )); then
 <key>signingStyle</key><string>manual</string>
 <key>signingCertificate</key><string>Apple Distribution</string>
 <key>provisioningProfiles</key><dict>
-  <key>$(cd "$src/ios" && sed -n 's/^VOXT_MOBILE_ID_PREFIX = //p' Config/Signing.xcconfig)</key><string>$VOXT_PROFILE_APP</string>
-  <key>$(cd "$src/ios" && sed -n 's/^VOXT_MOBILE_ID_PREFIX = //p' Config/Signing.xcconfig).keyboard</key><string>$VOXT_PROFILE_KEYBOARD</string>
+  <key>$prefix</key><string>$VOXT_PROFILE_APP</string>
+  <key>$prefix.keyboard</key><string>$VOXT_PROFILE_KEYBOARD</string>
 </dict>
 <key>manageAppVersionAndBuildNumber</key><false/>
 </dict></plist>
@@ -87,7 +111,7 @@ EOF
   run xcodebuild archive -project "$src/ios/VoxtMobile.xcodeproj" -scheme VoxtMobile -configuration Release \
     -destination generic/platform=iOS -archivePath "$out/VoxtMobile-$build.xcarchive" -derivedDataPath "$derived" \
     -resultBundlePath "$out/archive-$build.xcresult" -packageCachePath "$root/build/swiftpm-cache" \
-    CURRENT_PROJECT_VERSION="$build" VOXT_SOURCE_REVISION="$sha" \
+    -xcconfig "$VOXT_SIGNING_LOCAL" CURRENT_PROJECT_VERSION="$build" VOXT_SOURCE_REVISION="$sha" \
     DEVELOPMENT_TEAM="$VOXT_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" \
     'PROVISIONING_PROFILE_SPECIFIER=$(VOXT_PROFILE_$(TARGET_NAME))' \
     "VOXT_PROFILE_VoxtMobile=$VOXT_PROFILE_APP" "VOXT_PROFILE_VoxtKeyboard=$VOXT_PROFILE_KEYBOARD" \
@@ -98,11 +122,12 @@ EOF
 fi
 
 if (( mac )); then
-  run env VOXT_CONNECTOR_SIGNING_IDENTITY="$VOXT_DEVELOPER_ID" python3 -I "$src/tools/build-connector.py" --source-revision "$sha"
+  run env VOXT_CONNECTOR_SIGNING_IDENTITY="$VOXT_DEVELOPER_ID" python3 -I "$src/tools/build-connector.py" --source-revision "$sha" \
+    --bundle-id "$connector_id"
   app="$src/build/connector-derived/Build/Products/Release/Voxt Connector.app"
-  # Voxt's ConnectorLinkServer trusts only a Connector signed by Voxt's own team with this identifier,
-  # so Voxt Omni Dev must be signed by the same team.
-  requirement="anchor apple generic and certificate leaf[subject.OU] = \"$team\" and identifier \"com.voxtmobile.connector\""
+  # Voxt's ConnectorLinkServer trusts only a Connector signed by Voxt's own team with the Connector's
+  # bundle ID, so Voxt Omni Dev must be signed by the same team.
+  requirement="anchor apple generic and certificate leaf[subject.OU] = \"$team\" and identifier \"$connector_id\""
   run python3 -I "$here/release-mac.py" sign --identity "$VOXT_DEVELOPER_ID" --team "$team" --strip-debug --requirement "$requirement" "$app"
   for extra in ${mac_apps[@]+"${mac_apps[@]}"}; do
     run python3 -I "$here/release-mac.py" sign --identity "$VOXT_DEVELOPER_ID" --team "$team" --strip-debug "$extra"

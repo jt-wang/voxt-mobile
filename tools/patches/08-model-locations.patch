@@ -1,0 +1,215 @@
+diff --git a/Voxt/Voxt/App/LocalAPIFlow.swift b/Voxt/Voxt/App/LocalAPIFlow.swift
+index 5e385d71b42e2b15ee61fceffcef26af7402c1c8..678b26b669fab52bac248d07e52b34b5fa644bf7 100644
+--- a/Voxt/Voxt/App/LocalAPIFlow.swift
++++ b/Voxt/Voxt/App/LocalAPIFlow.swift
+@@ -55,6 +55,14 @@ extension AppDelegate {
+             modelStatus: { [weak self] in
+                 self?.localAPIModelStatus() ?? LocalAPIModelStatus(transcription: .missing, text: .missing)
+             },
++            modelLocations: { [weak self] in
++                guard let self else { return .unknown }
++                let speech = ASRHintSettingsStore.resolvedSettings(
++                    for: .dictation, rawValue: UserDefaults.standard.string(forKey: AppPreferenceKey.asrHintSettings))
++                return .resolve(transcriptionEngine: self.transcriptionEngine.rawValue,
++                                enhancementMode: self.enhancementMode.rawValue,
++                                appleSpeechOnDevice: speech.prefersOnDeviceRecognition)
++            },
+             dictate: { dictation in
+                 await pipeline.run(dictation)
+             },
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
+index 1caf1d011f9ceaafe5d1b43e9fe2590b505cf079..d308ba70cec87ee054223d41dda73dc5c6bd1a89 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
+@@ -13,6 +13,43 @@ nonisolated struct LocalAPIModelStatus: Encodable, Sendable {
+     var text: LocalAPIModelReadiness
+ }
+ 
++nonisolated enum LocalAPIModelLocation: String, Encodable, Equatable, Sendable {
++    case local, remote, unknown
++}
++
++/// Where the selected models run, for a client that must not send audio or text off the Mac.
++nonisolated struct LocalAPIModelLocations: Encodable, Equatable, Sendable {
++    var transcription: LocalAPIModelLocation
++    var text: LocalAPIModelLocation
++
++    static let unknown = LocalAPIModelLocations(transcription: .unknown, text: .unknown)
++
++    /// Anything not known to stay on the Mac is unknown, never local.
++    static func resolve(transcriptionEngine: String, enhancementMode: String,
++                        appleSpeechOnDevice: Bool = false) -> Self {
++        let transcription: LocalAPIModelLocation
++        switch transcriptionEngine {
++        case "mlxAudio": transcription = .local
++        case "remote": transcription = .remote
++        // SpeechTranscriber.startSpeechRecognition sets requiresOnDeviceRecognition from this
++        // setting; false permits network use.
++        case "dictation": transcription = appleSpeechOnDevice ? .local : .unknown
++        default: transcription = .unknown
++        }
++        let text: LocalAPIModelLocation
++        switch enhancementMode {
++        // With no text model nothing is sent anywhere.
++        case "customLLM", "off": text = .local
++        // TextEnhancer uses FoundationModels SystemLanguageModel.default, which Apple describes
++        // as on-device: https://developer.apple.com/documentation/foundationmodels/systemlanguagemodel
++        case "appleIntelligence": text = .local
++        case "remoteLLM": text = .remote
++        default: text = .unknown
++        }
++        return Self(transcription: transcription, text: text)
++    }
++}
++
+ nonisolated enum LocalAPIRequestHandler {
+     private struct Health: Encodable {
+         var ok: Bool
+@@ -37,19 +74,35 @@ nonisolated enum LocalAPIRequestHandler {
+         var endpoints: [String]
+         var audio: Audio
+         var models: LocalAPIModelStatus
++        var locations: LocalAPIModelLocations
+     }
+ 
+     static func make(
+         router: LocalAPIRouter,
+         version: String,
+         modelStatus: @escaping @MainActor @Sendable () -> LocalAPIModelStatus,
++        modelLocations: @escaping @MainActor @Sendable () -> LocalAPIModelLocations = { .unknown },
+         dictate: @escaping @MainActor @Sendable (LocalAPIDictationRequest) async -> LocalAPIHTTPResponse,
+         compose: @escaping @MainActor @Sendable (LocalAPIComposeRequest) async -> LocalAPIHTTPResponse = { _ in
+             .error(status: 503, "No text model is available for this operation.")
+         }
+     ) -> LocalAPIServer.Handler {
+         { request in
+-            switch router.route(request) {
++            let route = router.route(request)
++            // "X-Voxt-Model-Policy: local-only": the client does not allow its audio or text to
++            // reach a cloud model, so the request is refused before anything runs.
++            if request.header("x-voxt-model-policy") == "local-only" {
++                switch route {
++                case .dictation, .compose:
++                    let locations = await modelLocations()
++                    guard locations.transcription == .local, locations.text == .local else {
++                        let cloud = locations.transcription == .remote || locations.text == .remote
++                        return .error(status: 403, cloud ? "Your Mac is set to a cloud model." : "Could not verify that your Mac uses local models.")
++                    }
++                default: break
++                }
++            }
++            switch route {
+             case .health:
+                 return .json(status: 200, Health(ok: true, app: "Voxt", version: version))
+             case .capabilities:
+@@ -69,7 +122,8 @@ nonisolated enum LocalAPIRequestHandler {
+                         contentTypes: LocalAPIRouter.audioExtensions.keys.sorted(),
+                         maxBodyBytes: router.maxBodyBytes
+                     ),
+-                    models: models
++                    models: models,
++                    locations: await modelLocations()
+                 ))
+             case .composePrompts:
+                 return .json(status: 200, ["prompts": LocalAPIComposePrompt.builtInPrompts()])
+diff --git a/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift b/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
+index c24a202a6bb4126a7b071f5f4e1af18aac132ba8..6216aefed1748147ffea317f7740029c22aa78d3 100644
+--- a/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
++++ b/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
+@@ -96,6 +96,8 @@ final class LocalAPIRequestHandlerTests: XCTestCase {
+         XCTAssertEqual(audio["contentTypes"] as? [String], LocalAPIRouter.audioExtensions.keys.sorted())
+         let models = try XCTUnwrap(body["models"] as? [String: String])
+         XCTAssertEqual(models, ["transcription": "ready", "text": "off"])
++        XCTAssertEqual(body["locations"] as? [String: String], ["transcription": "unknown", "text": "unknown"],
++                       "a handler that is not told where the models run says unknown")
+     }
+ 
+     func testBuiltInPromptsRequireTheTokenAndListEveryMode() async throws {
+@@ -133,4 +135,61 @@ final class LocalAPIRequestHandlerTests: XCTestCase {
+         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: String])
+         XCTAssertEqual(body["mode"], "write")
+     }
++
++    func testLocationsAreConservativeAndMatchTheSelectedProviders() {
++        func resolve(_ engine: String, _ mode: String, onDevice: Bool = false) -> LocalAPIModelLocations {
++            .resolve(transcriptionEngine: engine, enhancementMode: mode, appleSpeechOnDevice: onDevice)
++        }
++        XCTAssertEqual(resolve("mlxAudio", "customLLM"), .init(transcription: .local, text: .local))
++        XCTAssertEqual(resolve("remote", "remoteLLM"), .init(transcription: .remote, text: .remote))
++        XCTAssertEqual(resolve("dictation", "appleIntelligence").transcription, .unknown)
++        XCTAssertEqual(resolve("dictation", "appleIntelligence", onDevice: true).transcription, .local)
++        XCTAssertEqual(resolve("mlxAudio", "appleIntelligence").text, .local)
++        XCTAssertEqual(resolve("mlxAudio", "off").text, .local, "no text model sends nothing anywhere")
++        XCTAssertEqual(resolve("future", "future"), .init(transcription: .unknown, text: .unknown))
++    }
++
++    func testCapabilitiesSayWhereTheSelectedModelsRun() async throws {
++        let handler = LocalAPIRequestHandler.make(
++            router: LocalAPIRouter(token: "t", maxBodyBytes: 10), version: "1",
++            modelStatus: Self.readyModels,
++            modelLocations: { .init(transcription: .local, text: .remote) },
++            dictate: { _ in .error(status: 500, "unused") })
++        let response = await handler(request("GET", "/v1/capabilities"))
++        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: Any])
++        XCTAssertEqual(body["locations"] as? [String: String], ["transcription": "local", "text": "remote"])
++    }
++
++    func testLocalOnlyRequestNeverReachesACloudModel() async throws {
++        func handler(_ locations: LocalAPIModelLocations) -> LocalAPIServer.Handler {
++            LocalAPIRequestHandler.make(
++                router: LocalAPIRouter(token: "t", maxBodyBytes: 1_000), version: "1",
++                modelStatus: Self.readyModels,
++                modelLocations: { locations },
++                dictate: { _ in .json(status: 200, ["text": "local"]) },
++                compose: { _ in .json(status: 200, ["text": "local"]) })
++        }
++        var dictation = request("POST", "/v1/dictations")
++        dictation.headers["content-type"] = "audio/wav"
++        dictation.headers["x-voxt-model-policy"] = "local-only"
++        dictation.body = Data([1])
++        var compose = request("POST", "/v1/compose")
++        compose.headers["content-type"] = "application/json"
++        compose.headers["x-voxt-model-policy"] = "local-only"
++        compose.body = try JSONSerialization.data(withJSONObject: [
++            "audio": Data([1]).base64EncodedString(), "contentType": "audio/wav", "options": ["mode": "dictate"]])
++        for audio in [dictation, compose] {
++            let cloud = await handler(.init(transcription: .remote, text: .local))(audio)
++            XCTAssertEqual(cloud.status, 403)
++            XCTAssertEqual(try JSONSerialization.jsonObject(with: cloud.body) as? [String: String], ["error": "Your Mac is set to a cloud model."])
++            let unknown = await handler(.init(transcription: .local, text: .unknown))(audio)
++            XCTAssertEqual(unknown.status, 403)
++            let local = await handler(.init(transcription: .local, text: .local))(audio)
++            XCTAssertEqual(local.status, 200)
++            var allowed = audio
++            allowed.headers["x-voxt-model-policy"] = "cloud-allowed"
++            let cloudAllowed = await handler(.init(transcription: .remote, text: .remote))(allowed)
++            XCTAssertEqual(cloudAllowed.status, 200)
++        }
++    }
+ }
+diff --git a/Voxt/docs/LocalAPI.md b/Voxt/docs/LocalAPI.md
+index e88f352ed4c525d81fcf8eb2da10ee3734c1be27..085fa07642a0a222a61d86ac0bbf659cd4587091 100644
+--- a/Voxt/docs/LocalAPI.md
++++ b/Voxt/docs/LocalAPI.md
+@@ -60,9 +60,12 @@ Every compose mode needs a working text model; without one the request fails wit
+ {"api":{"major":1,"minor":0},"app":"Voxt","version":"1.15.0",
+  "endpoints":["health","capabilities","dictations","compose","compose/prompts"],
+  "audio":{"contentTypes":["audio/aac","audio/m4a","audio/mp4","audio/mpeg","audio/wav","audio/wave","audio/x-caf","audio/x-m4a","audio/x-wav"],"maxBodyBytes":26214400},
+- "models":{"transcription":"ready","text":"off"}}
++ "models":{"transcription":"ready","text":"off"},
++ "locations":{"transcription":"local","text":"local"}}
+ ```
+ 
++`locations` says where the selected models run: `local`, `remote` (a cloud provider) or `unknown` (Apple Speech without on-device recognition, or anything Voxt cannot vouch for). A client that must keep audio and text on the Mac sends `X-Voxt-Model-Policy: local-only` with a dictation or compose request; Voxt then answers 403 unless both are `local`.
++
+ Model states are `ready`, `missing` (selected but not downloaded or not configured), `off` (no text model) and `unsupported` (Apple Speech cannot transcribe recorded files).
+ 
+ `/v1` only gains fields and endpoints. Clients should ignore fields they do not know. A breaking change would use `/v2`.
+@@ -75,6 +78,7 @@ Errors return `{"error": "…"}`.
+ | --- | --- |
+ | 400 | Empty body, audio that cannot be read, or a `language` that is not `auto` or a language name |
+ | 401 | Missing or wrong token |
++| 403 | `X-Voxt-Model-Policy: local-only`, and a selected model is not local |
+ | 404 / 405 | Unknown path or wrong method |
+ | 411 | Chunked request body; send `Content-Length` |
+ | 413 | Body larger than 25 MB |

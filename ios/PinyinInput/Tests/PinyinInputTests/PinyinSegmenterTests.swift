@@ -76,6 +76,11 @@ import Testing
         #expect(PinyinSegmenter.matches(typed, syllable, fuzzy: fuzzy) == matches)
     }
 
+    @Test func everySyllableInTheListIsItsOwnEntry() {
+        #expect(PinyinSegmenter.syllables.count == 415)
+        #expect(PinyinSegmenter.syllables.isSuperset(of: ["ce", "cei", "chun", "chuo", "dong", "dou", "gen", "geng"]))
+    }
+
     @Test func apostropheIsAHardBoundaryEvenWhenOneSyllableFits() {
         #expect(segmenter.split("xian").syllables.count == 1)
         #expect(segmenter.split("xi'an").syllables.count == 2)

@@ -16,8 +16,13 @@ check "keyboard = app + .keyboard" "$(setting VoxtKeyboard PRODUCT_BUNDLE_IDENTI
 check "unit tests bundle ID" "$(setting VoxtMobileTests PRODUCT_BUNDLE_IDENTIFIER)" "$prefix.tests"
 check "UI tests bundle ID" "$(setting VoxtMobileUITests PRODUCT_BUNDLE_IDENTIFIER)" "$prefix.uitests"
 check "URL scheme name is the app ID" "$(grep -A1 CFBundleURLName App/Info.plist | grep -c '\$(PRODUCT_BUNDLE_IDENTIFIER)')" 1
-# The official build uses these IDs; other signers set their own prefix (set-team.sh).
-check "default prefix" "$(sed -n 's/^VOXT_MOBILE_ID_PREFIX = //p' Config/Signing.xcconfig)" io.jingtao.voxtmobile
+# Neutral defaults; each signer sets their own prefix in Signing.local.xcconfig.
+check "default prefix" "$(sed -n 's/^VOXT_MOBILE_ID_PREFIX = //p' Config/Signing.shared.xcconfig)" com.voxt.VoxtMobile
+check "default team is empty" "$(grep -c '^DEVELOPMENT_TEAM =$' Config/Signing.shared.xcconfig)" 1
+check "Keychain names follow the prefix" "$(sed -n 's/^VOXT_KEYCHAIN_SERVICE_PREFIX = //p' Config/Signing.shared.xcconfig)" '$(VOXT_MOBILE_ID_PREFIX)'
+check "App/Info.plist publishes VoxtKeychainServicePrefix" "$(grep -A1 VoxtKeychainServicePrefix App/Info.plist | grep -c '\$(VOXT_KEYCHAIN_SERVICE_PREFIX)')" 1
+check "default source link is upstream" "$(sed -n 's/^VOXT_SOURCE_URL = //p' Config/Signing.shared.xcconfig)" github.com/sgl-project/sglang-omni
+check "App/Info.plist publishes VoxtSourceURL" "$(grep -A1 VoxtSourceURL App/Info.plist | grep -c '\$(VOXT_SOURCE_URL)')" 1
 check "app App Group" "$(setting VoxtMobile VOXT_APP_GROUP)" "group.$prefix.shared"
 check "keyboard App Group" "$(setting VoxtKeyboard VOXT_APP_GROUP)" "group.$prefix.shared"
 for f in App/VoxtMobile.entitlements Keyboard/VoxtKeyboard.entitlements; do

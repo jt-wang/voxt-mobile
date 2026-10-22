@@ -1,6 +1,6 @@
 import XCTest
 
-/// End-to-end tests against a real Voxt Remote Input server. They run only when the test
+/// End-to-end tests against a real Voxt Local API server. They run only when the test
 /// runner gets these variables (prefix them with TEST_RUNNER_ for xcodebuild):
 ///   VOXT_E2E_URL    e.g. https://your-mac.tailnet.ts.net:47911
 ///   VOXT_E2E_TOKEN  pairing token
@@ -36,42 +36,24 @@ final class DictationFlowUITests: XCTestCase {
         try launchAppPairedByLink()
     }
 
+    /// A dictation into the app's own text field goes through the Mac, lands in the field and in History.
     func testInAppDictationGoesThroughMac() throws {
+        try enableVoxtKeyboard()
         let app = try launchPairedApp()
         snap("02-home-idle", app)
-
-        let record = app.buttons["recordButton"]
-        // SwiftUI List rows report their buttons as not hittable; tap the button's centre instead.
-        let recordCentre = record.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        recordCentre.tap()
-        let recording = expectation(for: NSPredicate(format: "label == %@", "Stop recording"), evaluatedWith: record)
-        if XCTWaiter().wait(for: [recording], timeout: 5) != .completed {
-            print("UI state when recording did not start:\n\(app.debugDescription)")
-            XCTFail("Recording did not start")
-            return
-        }
-        snap("03-home-recording", app)
-        recordCentre.tap()
-
-        let result = app.staticTexts["historyText"].firstMatch
-        XCTAssertTrue(result.waitForExistence(timeout: 180), "No text came back from the Mac")
+        let value = try dictateIntoPracticeField(app)
         if let expected = env["VOXT_E2E_EXPECT"] {
-            XCTAssertTrue(result.label.contains(expected), "Got: \(result.label)")
+            XCTAssertTrue(value.contains(expected), "Field holds: \(value)")
         }
-        print("UI E2E in-app text: \(result.label)")
-        let historySelected = expectation(
-            for: NSPredicate(format: "isSelected == true"),
-            evaluatedWith: app.tabBars.buttons["History"]
-        )
-        XCTAssertEqual(XCTWaiter.wait(for: [historySelected], timeout: 5), .completed)
-        snap("04-history", app)
+        print("UI E2E in-app text: \(value)")
 
-        app.tabBars.buttons["Home"].tap()
-        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 5))
-        app.buttons["Settings"].tap()
-        XCTAssertTrue(app.buttons["Open Settings"].waitForExistence(timeout: 5), "Settings sheet did not open")
-        snap("05-settings", app)
-        app.buttons["Done"].tap()
+        // The keyboard covers the tab bar; Home's bar closes it.
+        app.buttons["Hide keyboard"].tap()
+        app.tabBars.buttons["History"].tap()
+        let result = app.staticTexts["historyText"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 10), "History has no entry for the dictation")
+        XCTAssertEqual(result.label, value.trimmingCharacters(in: .whitespaces))
+        snap("04-history", app)
     }
 
     /// Uses connector QR for transport tests, injected localhost config for UI fixtures. Avoids typeText, whose
@@ -330,7 +312,25 @@ final class DictationFlowUITests: XCTestCase {
     func testKeyboardDictatesIntoTextField() throws {
         try enableVoxtKeyboard()
         let app = try launchAppPairedByLink()
+        let value = try dictateIntoPracticeField(app)
+        if let expected = env["VOXT_E2E_EXPECT"] {
+            XCTAssertTrue(value.contains(expected), "Field holds: \(value)")
+        } else {
+            XCTAssertFalse(value.isEmpty)
+        }
+        print("UI E2E keyboard text: \(value)")
+    }
 
+    /// A fresh simulator shows two one-time iOS tips over the keyboard: "Quickly Change Keyboards"
+    /// after the first switch, and the slide-to-type tip over the first system keyboard. Continue closes either.
+    private func dismissKeyboardTip(_ app: XCUIApplication) {
+        let tip = app.staticTexts.matching(NSPredicate(format: "label == 'Quickly Change Keyboards' OR label BEGINSWITH 'Speed up your typing by sliding'")).firstMatch
+        let close = app.buttons["Continue"].firstMatch
+        if tip.waitForExistence(timeout: 1), close.exists { close.tap() }
+    }
+
+    /// Switches the practice field to the Voxt keyboard, records once and returns the text the Mac sent.
+    private func dictateIntoPracticeField(_ app: XCUIApplication) throws -> String {
         let field = app.textFields["tryField"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
@@ -346,6 +346,7 @@ final class DictationFlowUITests: XCTestCase {
         while !mic.waitForExistence(timeout: 2), switches < 6, nextKeyboard.exists {
             print("Keyboard before switch \(switches): \(nextKeyboard.value ?? "nil")")
             nextKeyboard.tap()
+            dismissKeyboardTip(app)
             switches += 1
         }
         if !mic.exists, nextKeyboard.exists {
@@ -372,18 +373,14 @@ final class DictationFlowUITests: XCTestCase {
 
         let deadline = Date().addingTimeInterval(180)
         var value = ""
-        let placeholder = "Switch to the Voxt keyboard and tap the mic"
+        // An empty field reports its placeholder as its value.
+        let placeholders = ["Switch to the Voxt keyboard and tap the mic", field.placeholderValue ?? ""]
         while Date() < deadline {
             value = field.value as? String ?? ""
-            if !value.isEmpty, value != placeholder { break }
+            if !value.isEmpty, !placeholders.contains(value) { break }
             Thread.sleep(forTimeInterval: 1)
         }
-        if let expected = env["VOXT_E2E_EXPECT"] {
-            XCTAssertTrue(value.contains(expected), "Field holds: \(value)")
-        } else {
-            XCTAssertFalse(value.isEmpty)
-        }
-        print("UI E2E keyboard text: \(value)")
+        return value
     }
 
     func testKeyboardLearnsCorrectedSpellingAndCanUndoIt() throws {
@@ -1066,6 +1063,10 @@ final class DictationFlowUITests: XCTestCase {
 
     /// Settings > General > Keyboard > Keyboards > Add New Keyboard… > Voxt, then Allow Full Access.
     private func enableVoxtKeyboard() throws {
+        // On a fresh simulator Settings lists the Voxt keyboard only after Voxt has been opened once.
+        let voxt = XCUIApplication()
+        voxt.launch()
+        voxt.terminate()
         let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
         settings.terminate()
         settings.launch()

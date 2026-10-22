@@ -112,7 +112,7 @@ struct UserVisibleStringsL10nTests {
         #expect(app.contains("Keep Voxt ready"))
         #expect(keyboard.contains("Tap to speak"))
         #expect(keyboard.contains("Opening Voxt to reconnect to your Mac. Tap ◀ to come back."))
-        #expect(!Self.isProse("textKey-shift") && !Self.isProse("VOXT_TEST_RESET") && !Self.isProse("https://github.com/jt-wang"))
+        #expect(!Self.isProse("textKey-shift") && !Self.isProse("VOXT_TEST_RESET") && !Self.isProse("https://github.com/sgl-project"))
         #expect(!Self.isProse(#"textKey-\(key.text ?? key.label)"#) && !Self.isProse(" start=ignored"), "identifiers and diagnostics")
         #expect(Self.isProse("Source code") && Self.isProse("Retry"))
     }

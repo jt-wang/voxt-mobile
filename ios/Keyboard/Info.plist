@@ -40,6 +40,8 @@
 	</dict>
 	<key>VoxtAppGroup</key>
 	<string>$(VOXT_APP_GROUP)</string>
+	<key>VoxtInputMethods</key>
+	<string>$(VOXT_INPUT_METHODS)</string>
 	<key>VoxtSourceRevision</key>
 	<string>$(VOXT_SOURCE_REVISION)</string>
 </dict>

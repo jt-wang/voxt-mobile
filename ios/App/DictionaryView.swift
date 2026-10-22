@@ -28,12 +28,14 @@ struct DictionaryView: View {
                         Text(VoxtL10n.shared.string("Add names and terms you use. Your Mac receives these spellings with each recording."))
                             .foregroundStyle(.secondary)
                     }
-                    Section {
-                        Toggle(VoxtL10n.shared.string("Learn corrected words"), isOn: $learnsCorrections)
-                            .accessibilityIdentifier("learnCorrectedWords")
-                            .onChange(of: learnsCorrections) { _, enabled in model.learning.isEnabled = enabled }
-                    } footer: {
-                        Text(VoxtL10n.shared.string("After dictation, completed corrections go to your Mac’s text model to learn names and spellings. Review or undo learned words below."))
+                    if model.macServes(.corrections) {
+                        Section {
+                            Toggle(VoxtL10n.shared.string("Learn corrected words"), isOn: $learnsCorrections)
+                                .accessibilityIdentifier("learnCorrectedWords")
+                                .onChange(of: learnsCorrections) { _, enabled in model.learning.isEnabled = enabled }
+                        } footer: {
+                            Text(VoxtL10n.shared.string("After dictation, completed corrections go to your Mac’s text model to learn names and spellings. Review or undo learned words below."))
+                        }
                     }
                     if !records.isEmpty {
                         Section(VoxtL10n.shared.string("Learned words")) {

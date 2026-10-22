@@ -77,7 +77,7 @@ struct AppScreensL10nTests {
         "Up to 3 languages",
         "Confirm on your Mac: code",
         "Don't have Voxt Connector yet?",
-        "Voxt Connector runs on your Mac next to Voxt and shows this QR. Set up both from github.com/jt-wang/voxt-mobile.",
+        "Voxt Connector runs on your Mac next to Voxt and shows this QR. Set up both from the link below.",
         "Camera paused",
         "Connect your Mac",
         "On your Mac, open Voxt Connector and choose Add iPhone. Then point this iPhone at the QR.",

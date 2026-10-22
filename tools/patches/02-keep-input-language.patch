@@ -1,5 +1,5 @@
 diff --git a/Voxt/Voxt/App/LLMExecutionPlanning.swift b/Voxt/Voxt/App/LLMExecutionPlanning.swift
-index 85e2254..5ae9430 100644
+index c83ae8013c37b5bd6be5753d94bd3d4a8d856ad0..967f9407aa76ca9f35c219654a0bac52dcb6a93f 100644
 --- a/Voxt/Voxt/App/LLMExecutionPlanning.swift
 +++ b/Voxt/Voxt/App/LLMExecutionPlanning.swift
 @@ -470,7 +470,8 @@ extension AppDelegate {
@@ -13,10 +13,10 @@ index 85e2254..5ae9430 100644
      }
  
 diff --git a/Voxt/Voxt/App/TranscriptionFlow.swift b/Voxt/Voxt/App/TranscriptionFlow.swift
-index 244d869..885c458 100644
+index 48853c0a10851ff61e9d6645f3226045dd668353..f5dd5ebff8e05568f059f900f0f0e866526453d5 100644
 --- a/Voxt/Voxt/App/TranscriptionFlow.swift
 +++ b/Voxt/Voxt/App/TranscriptionFlow.swift
-@@ -191,7 +191,16 @@ extension AppDelegate {
+@@ -189,7 +189,16 @@ extension AppDelegate {
          ) else {
              return text
          }
@@ -36,7 +36,7 @@ index 244d869..885c458 100644
              originalText: text,
 diff --git a/Voxt/Voxt/Core/LLM/EnhancementLanguageGuard.swift b/Voxt/Voxt/Core/LLM/EnhancementLanguageGuard.swift
 new file mode 100644
-index 0000000..88d6297
+index 0000000000000000000000000000000000000000..88d62978d1a30414589725a8fba3e9e083803ee1
 --- /dev/null
 +++ b/Voxt/Voxt/Core/LLM/EnhancementLanguageGuard.swift
 @@ -0,0 +1,106 @@
@@ -147,7 +147,7 @@ index 0000000..88d6297
 +    }
 +}
 diff --git a/Voxt/Voxt/Core/LLM/LLMExecutionPlan.swift b/Voxt/Voxt/Core/LLM/LLMExecutionPlan.swift
-index 5637472..4e2ca34 100644
+index 5637472bde73aff5e83322bee8a678b3beebd5ba..4e2ca3408fd685943f2845c24715626618789f22 100644
 --- a/Voxt/Voxt/Core/LLM/LLMExecutionPlan.swift
 +++ b/Voxt/Voxt/Core/LLM/LLMExecutionPlan.swift
 @@ -52,6 +52,8 @@ struct LLMExecutionPlan: Equatable {
@@ -160,7 +160,7 @@ index 5637472..4e2ca34 100644
      var promptCharacterCount: Int {
          promptContent.count
 diff --git a/Voxt/Voxt/Core/LLM/LLMExecutionPlanCompiler.swift b/Voxt/Voxt/Core/LLM/LLMExecutionPlanCompiler.swift
-index dc5f60c..78fecba 100644
+index dc5f60c0028fd239613692c80554a69e03b1dd62..78fecbac4f4db862a7e6d8fa51ee71a792a08dcb 100644
 --- a/Voxt/Voxt/Core/LLM/LLMExecutionPlanCompiler.swift
 +++ b/Voxt/Voxt/Core/LLM/LLMExecutionPlanCompiler.swift
 @@ -17,7 +17,7 @@ enum LLMExecutionPlanCompiler {
@@ -207,7 +207,7 @@ index dc5f60c..78fecba 100644
              return """
 diff --git a/Voxt/VoxtTests/EnhancementLanguageGuardTests.swift b/Voxt/VoxtTests/EnhancementLanguageGuardTests.swift
 new file mode 100644
-index 0000000..8063ae6
+index 0000000000000000000000000000000000000000..8063ae687d971791270edb39db812b55a218ea53
 --- /dev/null
 +++ b/Voxt/VoxtTests/EnhancementLanguageGuardTests.swift
 @@ -0,0 +1,128 @@
@@ -340,7 +340,7 @@ index 0000000..8063ae6
 +    }
 +}
 diff --git a/Voxt/VoxtTests/LLMExecutionPlanCompilerTests.swift b/Voxt/VoxtTests/LLMExecutionPlanCompilerTests.swift
-index 7c8049f..df1eaa2 100644
+index 7c8049f0f04daf6647e97b9aaf046639f407cec5..df1eaa2d1a175ed6ff7c7ba0e96c047540490504 100644
 --- a/Voxt/VoxtTests/LLMExecutionPlanCompilerTests.swift
 +++ b/Voxt/VoxtTests/LLMExecutionPlanCompilerTests.swift
 @@ -59,6 +59,19 @@ final class LLMExecutionPlanCompilerTests: XCTestCase {

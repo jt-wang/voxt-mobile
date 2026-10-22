@@ -126,7 +126,7 @@ public struct ConnectorPhoneRequest: Identifiable, Equatable, Sendable {
         case let .localReady(version): return "Voxt \(version) is available"
         case let .ready(version, _): return "Ready for dictation · Voxt \(version)"
         case .failed(.unauthorized): return "The access token was rejected. Copy it from Voxt Settings."
-        case .failed(.unavailable): return "Could not reach Voxt. Open it and enable Remote Input."
+        case .failed(.unavailable): return "Could not reach Voxt. Open it and, in Settings › General › Local API, turn on “Allow other apps to dictate through Voxt”."
         case .failed(.invalidResponse): return "This address did not return a valid Voxt response."
         case .failed(.runtime): return "The phone connection stopped. Connect again."
         }

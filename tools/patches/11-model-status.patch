@@ -1,0 +1,173 @@
+diff --git a/Voxt/Voxt/App/LocalAPIFlow.swift b/Voxt/Voxt/App/LocalAPIFlow.swift
+index 678b26b669fab52bac248d07e52b34b5fa644bf7..316eb19410a384fbc89fc7f087fe0d3c91eb667f 100644
+--- a/Voxt/Voxt/App/LocalAPIFlow.swift
++++ b/Voxt/Voxt/App/LocalAPIFlow.swift
+@@ -33,7 +33,7 @@ extension AppDelegate {
+                 return try await self.transcribeLocalAPIAudio(at: url, language: language)
+             },
+             enhance: { [weak self] text in
+-                guard let self else { return text }
++                guard let self else { return nil }
+                 return try await self.enhanceLocalAPITranscript(text)
+             },
+             finalize: { [weak self] text in
+@@ -56,12 +56,7 @@ extension AppDelegate {
+                 self?.localAPIModelStatus() ?? LocalAPIModelStatus(transcription: .missing, text: .missing)
+             },
+             modelLocations: { [weak self] in
+-                guard let self else { return .unknown }
+-                let speech = ASRHintSettingsStore.resolvedSettings(
+-                    for: .dictation, rawValue: UserDefaults.standard.string(forKey: AppPreferenceKey.asrHintSettings))
+-                return .resolve(transcriptionEngine: self.transcriptionEngine.rawValue,
+-                                enhancementMode: self.enhancementMode.rawValue,
+-                                appleSpeechOnDevice: speech.prefersOnDeviceRecognition)
++                self?.localAPIModelLocations() ?? .unknown
+             },
+             dictate: { dictation in
+                 await pipeline.run(dictation)
+@@ -156,15 +151,16 @@ extension AppDelegate {
+         return nil
+     }
+ 
+-    private func enhanceLocalAPITranscript(_ text: String) async throws -> String {
++    /// nil when no text model runs, so the response does not claim an enhancement.
++    private func enhanceLocalAPITranscript(_ text: String) async throws -> String? {
+         switch enhancementMode {
+         case .off:
+-            return text
++            return nil
+         case .customLLM:
+             guard let repo = resolvedTranscriptionEnhancementLocalRepo(),
+                   customLLMManager.canAttemptInference(repo: repo) else {
+                 VoxtLog.asrWarning("Local API: custom LLM selected but not installed. Returning raw transcription.")
+-                return text
++                return nil
+             }
+         case .appleIntelligence, .remoteLLM:
+             break
+diff --git a/Voxt/Voxt/App/LocalAPITranscription.swift b/Voxt/Voxt/App/LocalAPITranscription.swift
+index e90d1a832a58f6f93bf4bdb1d1923dd9869cdc45..285b98706587a67a339aedfb856ba799efb6639f 100644
+--- a/Voxt/Voxt/App/LocalAPITranscription.swift
++++ b/Voxt/Voxt/App/LocalAPITranscription.swift
+@@ -66,7 +66,20 @@ extension AppDelegate {
+         }
+     }
+ 
++    /// Where the models of the next request run. A request first copies the feature settings onto
++    /// the engine and text-model keys, so this does too; read before that, a key left from an earlier
++    /// session reported a text model the request then did not have.
++    func localAPIModelLocations() -> LocalAPIModelLocations {
++        prepareLegacySettingsForSession(outputMode: .transcription)
++        let speech = ASRHintSettingsStore.resolvedSettings(
++            for: .dictation, rawValue: UserDefaults.standard.string(forKey: AppPreferenceKey.asrHintSettings))
++        return .resolve(transcriptionEngine: transcriptionEngine.rawValue,
++                        enhancementMode: enhancementMode.rawValue,
++                        appleSpeechOnDevice: speech.prefersOnDeviceRecognition)
++    }
++
+     func localAPIModelStatus() -> LocalAPIModelStatus {
++        prepareLegacySettingsForSession(outputMode: .transcription)
+         let transcription: LocalAPIModelReadiness
+         switch transcriptionEngine {
+         case .dictation:
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+index c0059a384c254b61d1c1045b67e7f04ede063bd7..489768d3dcec2a06d9db3dd78b48e1f6881c22da 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+@@ -43,8 +43,9 @@ final class LocalAPIDictationPipeline {
+     let isReadableAudio: (URL) -> Bool
+     /// Audio file → normalized transcript, using the engine selected in Voxt.
+     let transcribe: (URL, ASRLanguageSelection) async throws -> String
+-    /// Transcript → cleaned-up text, using Voxt's transcription enhancement settings.
+-    let enhance: (String) async throws -> String
++    /// Transcript → cleaned-up text, using Voxt's transcription enhancement settings; nil when no
++    /// text model ran.
++    let enhance: (String) async throws -> String?
+     /// Applies dictionary corrections to the final text.
+     let finalize: (String) -> LocalAPIFinalText
+     let record: (LocalAPIDictationOutcome) -> Void
+@@ -59,7 +60,7 @@ final class LocalAPIDictationPipeline {
+         busyReason: @escaping () -> String?,
+         isReadableAudio: @escaping (URL) -> Bool = LocalAPIDictationPipeline.isReadableAudioFile,
+         transcribe: @escaping (URL, ASRLanguageSelection) async throws -> String,
+-        enhance: @escaping (String) async throws -> String,
++        enhance: @escaping (String) async throws -> String?,
+         finalize: @escaping (String) -> LocalAPIFinalText,
+         record: @escaping (LocalAPIDictationOutcome) -> Void
+     ) {
+@@ -119,8 +120,8 @@ final class LocalAPIDictationPipeline {
+         if request.enhance {
+             let enhancementStart = Date()
+             do {
+-                let enhanced = try await enhance(rawText).trimmingCharacters(in: .whitespacesAndNewlines)
+-                if !enhanced.isEmpty {
++                if let enhanced = try await enhance(rawText)?.trimmingCharacters(in: .whitespacesAndNewlines),
++                   !enhanced.isEmpty {
+                     text = enhanced
+                     usedEnhancement = true
+                 }
+diff --git a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+index ac347f5b69922e160c7d7ea22f16575e83765c7f..65bd61a27bdb07b94e8ee433a4b98bf428801345 100644
+--- a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
++++ b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+@@ -29,7 +29,7 @@ final class LocalAPIDictationPipelineTests: XCTestCase {
+     private func makePipeline(
+         busyReason: String? = nil,
+         transcript: Result<String, Error> = .success("嗯 那个 明天下午三点开会"),
+-        enhanced: Result<String, Error> = .success("明天下午三点开会。"),
++        enhanced: Result<String?, Error> = .success("明天下午三点开会。"),
+         transcribeDelay: Duration = .zero,
+         checksAudioWithAVFoundation: Bool = false
+     ) -> LocalAPIDictationPipeline {
+@@ -73,6 +73,19 @@ final class LocalAPIDictationPipelineTests: XCTestCase {
+         XCTAssertEqual(transcribedLanguages, [.userSettings, .request("Chinese")])
+     }
+ 
++    func testNoTextModelMeansNotEnhanced() async throws {
++        // A Mac whose text model is off returned the transcript as "enhanced" in 3 ms.
++        let pipeline = makePipeline(enhanced: .success(nil))
++
++        let response = await pipeline.run(request)
++
++        XCTAssertEqual(response.status, 200)
++        let body = try json(response)
++        XCTAssertEqual(body["enhanced"] as? Bool, false)
++        XCTAssertEqual(body["text"] as? String, "嗯 那个 明天下午三点开会议")
++        XCTAssertEqual(recorded.first?.usedEnhancement, false)
++    }
++
+     func testSuccessfulDictationTranscribesEnhancesFinalizesAndRecords() async throws {
+         let pipeline = makePipeline()
+ 
+diff --git a/Voxt/VoxtTests/LocalAPIModelStatusTests.swift b/Voxt/VoxtTests/LocalAPIModelStatusTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc7b1a0204530882bcc8974aa75a775f3fdb3039
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIModelStatusTests.swift
+@@ -0,0 +1,26 @@
++// LocalAPIModelStatusTests.swift
++// Capabilities describe the models a request would use, which come from the feature settings.
++
++import XCTest
++@testable import Voxt
++
++@MainActor
++final class LocalAPIModelStatusTests: XCTestCase {
++    func testCapabilitiesFollowTheFeatureSettingsNotAStaleLegacyKey() throws {
++        let delegate = try XCTUnwrap(AppDelegate.shared)
++        let defaults = UserDefaults.standard
++        let keys = [AppPreferenceKey.featureSettings, AppPreferenceKey.enhancementMode]
++        let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, defaults.object(forKey: $0)) })
++        defer {
++            for (key, value) in previous { defaults.set(value, forKey: key) }
++        }
++        var features = FeatureSettingsStore.load(defaults: defaults)
++        features.transcription.llmEnabled = false
++        FeatureSettingsStore.save(features, defaults: defaults, notify: false)
++        // Left over from an earlier session; a request would reset it from the feature settings.
++        defaults.set(EnhancementMode.remoteLLM.rawValue, forKey: AppPreferenceKey.enhancementMode)
++
++        XCTAssertEqual(delegate.localAPIModelStatus().text, .off)
++        XCTAssertEqual(delegate.localAPIModelLocations().text, .local, "no text model sends nothing anywhere")
++    }
++}

@@ -25,11 +25,12 @@
 		322BA6BCEAF34CFBF8F65ECD /* Onboarding.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9453B0F6D1D8F3942885AE4 /* Onboarding.swift */; };
 		32E31407FF35F7A6564C9E8D /* MicrophoneCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 821D0408E0F30AD674B6A6CF /* MicrophoneCapture.swift */; };
 		3319EBE65F31ADC54FEDE3A3 /* JapaneseKeyboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C60EF0E45F02800A6C97A730 /* JapaneseKeyboardView.swift */; };
-		39C4AF32A13E999888D442C9 /* KoreanInput in Frameworks */ = {isa = PBXBuildFile; productRef = A5AA652A41F938B54EF54689 /* KoreanInput */; };
+		39C4AF32A13E999888D442C9 /* TypingHost in Frameworks */ = {isa = PBXBuildFile; productRef = D79EF57517A086319AD10BF3 /* TypingHost */; };
 		3E838227409BD75212065D28 /* DictationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46911ABF4195A36473ED5677 /* DictationView.swift */; };
 		43D9A47D6521AF8C28B5A08F /* AppModelDeveloperPromptsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC74F22282F23393852658CA /* AppModelDeveloperPromptsTests.swift */; };
 		4744C9DB27750C2F7C4EE658 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA43C695E03BA48A0590FFCA /* OnboardingView.swift */; };
-		5355BEB2B285916920684B16 /* PinyinInput in Frameworks */ = {isa = PBXBuildFile; productRef = 22C29D367B54E2137315D6DB /* PinyinInput */; };
+		4F783B66C0BC0F59EDEE9E54 /* AppModelMacFeaturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B997E344019B39D5CBBE0E8 /* AppModelMacFeaturesTests.swift */; };
+		5355BEB2B285916920684B16 /* SpanishInput in Frameworks */ = {isa = PBXBuildFile; productRef = 06281447DE9A9C5D26391D57 /* SpanishInput */; };
 		54177F6E38A929336C1DA091 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D8FD64C41F424EFFDD074DB0 /* Assets.xcassets */; };
 		57D44D92312AE12BBFF2C69A /* AppScreensUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8C1DCF01C41838761968D05 /* AppScreensUITests.swift */; };
 		5A8CEC952556A7DDB045ECEC /* TestLanguageLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 764D7BD1E8D0EE67913FEC97 /* TestLanguageLaunchTests.swift */; };
@@ -38,13 +39,13 @@
 		62B366EBBF9FE0B5C68CEAE3 /* KeyboardHandoffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E25545ED0745C63198BCB2FE /* KeyboardHandoffView.swift */; };
 		65AF14A56B67649C251860DF /* DictionaryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F62BFFA777FA78BAC8EB96DB /* DictionaryView.swift */; };
 		6FF0B82F3B1D3BBA518ACE7D /* AppModelConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CEE62A5600E01CBD6B465A1 /* AppModelConnectionTests.swift */; };
-		70116FCA5C50E99536F85390 /* ZhuyinInput in Frameworks */ = {isa = PBXBuildFile; productRef = 999389AFB1A5193A765F257F /* ZhuyinInput */; };
+		70116FCA5C50E99536F85390 /* PinyinInput in Frameworks */ = {isa = PBXBuildFile; productRef = 22C29D367B54E2137315D6DB /* PinyinInput */; };
 		7537C2CF67E109C273F4BDD3 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D26B0BC60F97AE9AB4FBF7F /* SettingsView.swift */; };
-		7790B78487AB4C1CF167CA49 /* JapaneseInput in Frameworks */ = {isa = PBXBuildFile; productRef = 8D6DDB3769CB7201466BD420 /* JapaneseInput */; };
+		7790B78487AB4C1CF167CA49 /* ZhuyinInput in Frameworks */ = {isa = PBXBuildFile; productRef = 999389AFB1A5193A765F257F /* ZhuyinInput */; };
 		83B5532B2EFC98DAEACD9B13 /* AppModelResultAttributionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BBB654FD3BD613DFC7FCBAD /* AppModelResultAttributionTests.swift */; };
 		85865862F2F7E60B3C8BE29A /* WeekSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD40D8C2C58D028E2F6E71C /* WeekSummary.swift */; };
 		8BD1ABC7071C3CB3FD90D5D0 /* ZhuyinKeyboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A548A45F81DAA4D188B88B9 /* ZhuyinKeyboardView.swift */; };
-		8CC2DDA6AE103907B50869BB /* TypingHost in Frameworks */ = {isa = PBXBuildFile; productRef = D79EF57517A086319AD10BF3 /* TypingHost */; };
+		8CC2DDA6AE103907B50869BB /* TypingInput in Frameworks */ = {isa = PBXBuildFile; productRef = FF96FC0325B0EA333728E08B /* TypingInput */; };
 		8D2B0036E414BFA90DCEFB72 /* AppModelCorrectionLifetimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34B5A414BC5A0E4462E44001 /* AppModelCorrectionLifetimeTests.swift */; };
 		94C3675EB629CED9240E9A6E /* KeyboardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26FE854EE2833D9ABC8DEFD7 /* KeyboardViewController.swift */; };
 		94DABD5FF4BD7CBADA07CE11 /* PenIntentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E3153CE755D3F9B659ECDCB /* PenIntentTests.swift */; };
@@ -53,13 +54,13 @@
 		9C8CB8CCC60A7F82B727215F /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = C573316AF3AAB69A2F226856 /* InfoPlist.strings */; };
 		9CB15EE50AA74DDF9AF5F415 /* AppModelTailcatInvitationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A35F25709DE34FB4BC8E4276 /* AppModelTailcatInvitationTests.swift */; };
 		9DC63C35E06A1C259C647710 /* AppModelPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C47B0131E57911A6EFEE24B /* AppModelPersistenceTests.swift */; };
-		AF2CD11490D33BD8C15515A4 /* VoxtMobileKit in Frameworks */ = {isa = PBXBuildFile; productRef = 569402215B01799888694C48 /* VoxtMobileKit */; };
+		AF2CD11490D33BD8C15515A4 /* JapaneseInput in Frameworks */ = {isa = PBXBuildFile; productRef = 8D6DDB3769CB7201466BD420 /* JapaneseInput */; };
 		AF7325E9DAFA1110D313180F /* CompositionSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = D05CBE63042DE9E0D6D1C0D6 /* CompositionSession.swift */; };
 		B17C8CB4DE227AAE57F92EDA /* DesignTourUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C53149FD2F88F732673E9CAF /* DesignTourUITests.swift */; };
 		B98073B447CC175B6BDC8219 /* TranslationLanguagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 058BD9792DB779D8BA580706 /* TranslationLanguagesView.swift */; };
 		BBF8BD4F5A726CDDF7D77F8B /* DeviceAppScreensUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B258E00BBCEC5924F37BFCD1 /* DeviceAppScreensUITests.swift */; };
 		C0D27AE0B69C43D39073A6E9 /* OnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56D431E0A60F34D24AA70C5D /* OnboardingTests.swift */; };
-		C44EDE699C04AA5601ED49FC /* TypingInput in Frameworks */ = {isa = PBXBuildFile; productRef = FF96FC0325B0EA333728E08B /* TypingInput */; };
+		C44EDE699C04AA5601ED49FC /* VoxtMobileKit in Frameworks */ = {isa = PBXBuildFile; productRef = 569402215B01799888694C48 /* VoxtMobileKit */; };
 		C8F3FD9C9F2B5BFFF321E741 /* PersonalStyleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 435D46623B9D8E9DBDB3A300 /* PersonalStyleView.swift */; };
 		CF3388E8B321CB5BBB6089C1 /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D874FBB937928ED6E546E2D /* HistoryView.swift */; };
 		D4D4D6E3DB103665609A264F /* AppModelHistorySyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F305E780A5580EAEDA008494 /* AppModelHistorySyncTests.swift */; };
@@ -68,7 +69,7 @@
 		E5571A38B617400859818A44 /* TextKeyboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 962A7F5FF725C5915C2DF572 /* TextKeyboardView.swift */; };
 		E744F7EC3A1DD9C48A0169B3 /* VoxtMobileKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA456DD9AE9A091CD6391D36 /* VoxtMobileKit */; };
 		EC0BFA7C39D33EF1DB255CE0 /* VoxtKeyboard.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F9B88B06EA39A3E16E257B76 /* VoxtKeyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		F70FCB2F67A0803E1C9DCC61 /* SpanishInput in Frameworks */ = {isa = PBXBuildFile; productRef = 06281447DE9A9C5D26391D57 /* SpanishInput */; };
+		F70FCB2F67A0803E1C9DCC61 /* KoreanInput in Frameworks */ = {isa = PBXBuildFile; productRef = A5AA652A41F938B54EF54689 /* KoreanInput */; };
 		FCAB19FBE3E8398A8A370C06 /* TestResetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A940BEBF7D6C3619BCA5C73 /* TestResetTests.swift */; };
 		FEFA2789D1E7ABBBFAC775DE /* HomeSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE244A93F561B9CF9C243FD7 /* HomeSummaryTests.swift */; };
 		FF0DF8723FAE682EEC46822D /* LocalizationBundleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0718882140522D65DFC9DFE9 /* LocalizationBundleTests.swift */; };
@@ -145,11 +146,12 @@
 		61E5AB68BC3991B880E32A40 /* VoxtMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = VoxtMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6CEE62A5600E01CBD6B465A1 /* AppModelConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelConnectionTests.swift; sourceTree = "<group>"; };
 		6D874FBB937928ED6E546E2D /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
+		71C95C42560F9E2BF2F3A19D /* Signing.shared.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.shared.xcconfig; sourceTree = "<group>"; };
 		764D7BD1E8D0EE67913FEC97 /* TestLanguageLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestLanguageLaunchTests.swift; sourceTree = "<group>"; };
+		7B997E344019B39D5CBBE0E8 /* AppModelMacFeaturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelMacFeaturesTests.swift; sourceTree = "<group>"; };
 		7BBB654FD3BD613DFC7FCBAD /* AppModelResultAttributionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelResultAttributionTests.swift; sourceTree = "<group>"; };
 		7C2D956FC0F1BCC29B87BC82 /* VoxtMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VoxtMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7FCE58D31F4E8CE88A109118 /* AppModelRecordingRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelRecordingRecoveryTests.swift; sourceTree = "<group>"; };
-		813AC53000A9A6FE1F71F641 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		821D0408E0F30AD674B6A6CF /* MicrophoneCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MicrophoneCapture.swift; sourceTree = "<group>"; };
 		893282F9DF4A68121857B5D4 /* VoxtMobile.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VoxtMobile.entitlements; sourceTree = "<group>"; };
 		8A8E26A9D1E22FB8ACE79B9B /* KeyboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardView.swift; sourceTree = "<group>"; };
@@ -195,14 +197,14 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AF2CD11490D33BD8C15515A4 /* VoxtMobileKit in Frameworks */,
-				7790B78487AB4C1CF167CA49 /* JapaneseInput in Frameworks */,
-				70116FCA5C50E99536F85390 /* ZhuyinInput in Frameworks */,
-				C44EDE699C04AA5601ED49FC /* TypingInput in Frameworks */,
-				8CC2DDA6AE103907B50869BB /* TypingHost in Frameworks */,
-				39C4AF32A13E999888D442C9 /* KoreanInput in Frameworks */,
-				F70FCB2F67A0803E1C9DCC61 /* SpanishInput in Frameworks */,
-				5355BEB2B285916920684B16 /* PinyinInput in Frameworks */,
+				AF2CD11490D33BD8C15515A4 /* JapaneseInput in Frameworks */,
+				7790B78487AB4C1CF167CA49 /* ZhuyinInput in Frameworks */,
+				70116FCA5C50E99536F85390 /* PinyinInput in Frameworks */,
+				C44EDE699C04AA5601ED49FC /* VoxtMobileKit in Frameworks */,
+				8CC2DDA6AE103907B50869BB /* TypingInput in Frameworks */,
+				39C4AF32A13E999888D442C9 /* TypingHost in Frameworks */,
+				F70FCB2F67A0803E1C9DCC61 /* KoreanInput in Frameworks */,
+				5355BEB2B285916920684B16 /* SpanishInput in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -221,7 +223,7 @@
 		29EF02FE24DD6F1E02CBDF1D /* Config */ = {
 			isa = PBXGroup;
 			children = (
-				813AC53000A9A6FE1F71F641 /* Signing.xcconfig */,
+				71C95C42560F9E2BF2F3A19D /* Signing.shared.xcconfig */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -292,6 +294,7 @@
 				EC74F22282F23393852658CA /* AppModelDeveloperPromptsTests.swift */,
 				F305E780A5580EAEDA008494 /* AppModelHistorySyncTests.swift */,
 				3D9D5AC00A615DB3B88FD2C3 /* AppModelKeyboardSettingsTests.swift */,
+				7B997E344019B39D5CBBE0E8 /* AppModelMacFeaturesTests.swift */,
 				3DF704FD6CD243E43317F820 /* AppModelNativeTailcatTests.swift */,
 				5C47B0131E57911A6EFEE24B /* AppModelPersistenceTests.swift */,
 				7FCE58D31F4E8CE88A109118 /* AppModelRecordingRecoveryTests.swift */,
@@ -425,14 +428,14 @@
 			);
 			name = VoxtKeyboard;
 			packageProductDependencies = (
-				569402215B01799888694C48 /* VoxtMobileKit */,
 				8D6DDB3769CB7201466BD420 /* JapaneseInput */,
 				999389AFB1A5193A765F257F /* ZhuyinInput */,
+				22C29D367B54E2137315D6DB /* PinyinInput */,
+				569402215B01799888694C48 /* VoxtMobileKit */,
 				FF96FC0325B0EA333728E08B /* TypingInput */,
 				D79EF57517A086319AD10BF3 /* TypingHost */,
 				A5AA652A41F938B54EF54689 /* KoreanInput */,
 				06281447DE9A9C5D26391D57 /* SpanishInput */,
-				22C29D367B54E2137315D6DB /* PinyinInput */,
 			);
 			productName = VoxtKeyboard;
 			productReference = F9B88B06EA39A3E16E257B76 /* VoxtKeyboard.appex */;
@@ -525,6 +528,7 @@
 				43D9A47D6521AF8C28B5A08F /* AppModelDeveloperPromptsTests.swift in Sources */,
 				D4D4D6E3DB103665609A264F /* AppModelHistorySyncTests.swift in Sources */,
 				E2D79D739AA611F535602B1C /* AppModelKeyboardSettingsTests.swift in Sources */,
+				4F783B66C0BC0F59EDEE9E54 /* AppModelMacFeaturesTests.swift in Sources */,
 				9B6ED701C556F9DF7A234AD2 /* AppModelNativeTailcatTests.swift in Sources */,
 				9DC63C35E06A1C259C647710 /* AppModelPersistenceTests.swift in Sources */,
 				2720ECBDFCBD19FBA7CEA8FF /* AppModelRecordingRecoveryTests.swift in Sources */,
@@ -635,7 +639,7 @@
 /* Begin XCBuildConfiguration section */
 		162EAADE55C4B49134EA358D /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 813AC53000A9A6FE1F71F641 /* Signing.xcconfig */;
+			baseConfigurationReference = 71C95C42560F9E2BF2F3A19D /* Signing.shared.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -697,6 +701,7 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 6.0;
+				VOXT_INPUT_METHODS = "ja-flick zh-Hant-zhuyin zh-Hans-pinyin";
 			};
 			name = Debug;
 		};
@@ -734,7 +739,7 @@
 		};
 		461BCE39554E8902AFD51369 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 813AC53000A9A6FE1F71F641 /* Signing.xcconfig */;
+			baseConfigurationReference = 71C95C42560F9E2BF2F3A19D /* Signing.shared.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -789,6 +794,7 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
+				VOXT_INPUT_METHODS = "ja-flick zh-Hant-zhuyin zh-Hans-pinyin";
 			};
 			name = Release;
 		};

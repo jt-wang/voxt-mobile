@@ -1,0 +1,511 @@
+diff --git a/Voxt/Voxt/App/LocalAPIFlow.swift b/Voxt/Voxt/App/LocalAPIFlow.swift
+index 164a884d65fcaf29278a302f3f741b4eed445297..5e385d71b42e2b15ee61fceffcef26af7402c1c8 100644
+--- a/Voxt/Voxt/App/LocalAPIFlow.swift
++++ b/Voxt/Voxt/App/LocalAPIFlow.swift
+@@ -3,6 +3,7 @@
+ // user's selected ASR model, enhancement and dictionary. The result is returned to the caller and
+ // saved to history; nothing is pasted on the Mac.
+ 
++import AppKit
+ import Foundation
+ 
+ extension AppDelegate {
+@@ -71,6 +72,7 @@ extension AppDelegate {
+                 VoxtLog.info("Local API server listening on 127.0.0.1:\(bound)")
+                 guard let self, self.localAPIServer === server else { return }
+                 self.localAPIServerStatus = .listening(port: Int(bound))
++                self.startLocalAPIConnectorLink(port: Int(bound))
+             } catch {
+                 VoxtLog.warning("Local API server failed to start: \(error.localizedDescription)")
+                 guard let self, self.localAPIServer === server else { return }
+@@ -82,6 +84,8 @@ extension AppDelegate {
+     }
+ 
+     func stopLocalAPIServer() {
++        localAPIConnectorLink?.stop()
++        localAPIConnectorLink = nil
+         localAPIServer?.stop()
+         localAPIServer = nil
+         localAPIServerPort = nil
+@@ -91,6 +95,49 @@ extension AppDelegate {
+         }
+     }
+ 
++    /// Lets Voxt Connector, signed by Voxt's own team, fetch the port and access token after one
++    /// "Allow". Ad-hoc and unsigned builds can't prove their identity, so the link does not start
++    /// and the Connector asks the user to enter both by hand.
++    private func startLocalAPIConnectorLink(port: Int) {
++        localAPIConnectorLink?.stop()
++        localAPIConnectorLink = nil
++        guard let team = LocalAPIConnectorLink.ownTeamIdentifier() else {
++            VoxtLog.info("Connector link not started: this Voxt build has no signing team.")
++            return
++        }
++        let rememberedKey = AppPreferenceKey.localAPIConnectorAlwaysAllowed
++        let link = LocalAPIConnectorLink(
++            team: team,
++            isRemembered: { UserDefaults.standard.bool(forKey: rememberedKey) },
++            remember: { UserDefaults.standard.set(true, forKey: rememberedKey) },
++            ask: { await Self.askToAllowConnector() },
++            // Called off the main thread: the port is fixed while this listener runs.
++            credentials: { (port, LocalAPISettings.token()) }
++        )
++        do {
++            try link.start()
++            localAPIConnectorLink = link
++        } catch {
++            VoxtLog.warning("Connector link did not start: \(error.localizedDescription)")
++        }
++    }
++
++    @MainActor
++    private static func askToAllowConnector() async -> LocalAPIConnectorLink.Decision {
++        NSApp.activate(ignoringOtherApps: true)
++        let alert = NSAlert()
++        alert.messageText = AppLocalization.localizedString("Allow Voxt Connector to use Voxt?")
++        alert.informativeText = AppLocalization.localizedString("It will forward dictations from your paired iPhone to Voxt on this Mac.")
++        alert.addButton(withTitle: AppLocalization.localizedString("Always Allow"))
++        alert.addButton(withTitle: AppLocalization.localizedString("Allow Once"))
++        alert.addButton(withTitle: AppLocalization.localizedString("Don't Allow"))
++        switch alert.runModal() {
++        case .alertFirstButtonReturn: return .allowAlways
++        case .alertSecondButtonReturn: return .allowOnce
++        default: return .deny
++        }
++    }
++
+     private func localAPIBusyReason() -> String? {
+         if isSessionActive {
+             return AppLocalization.localizedString("Voxt is recording on the Mac. Try again in a moment.")
+diff --git a/Voxt/Voxt/App/VoxtApp.swift b/Voxt/Voxt/App/VoxtApp.swift
+index b881ef03d3364928a3d6afb2e6e315102f17b61c..b3b31aac8f41f7d4dbce3e62e5901f4e92f91462 100644
+--- a/Voxt/Voxt/App/VoxtApp.swift
++++ b/Voxt/Voxt/App/VoxtApp.swift
+@@ -121,6 +121,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
+     }
+     var localAPISettingsObserver: NSObjectProtocol?
+     var localAPIActivity: NSObjectProtocol?
++    var localAPIConnectorLink: LocalAPIConnectorLink?
+     let mlxModelManager: MLXModelManager
+     let customLLMManager: CustomLLMModelManager
+     let ggufTranslationModelManager: GGUFTranslationModelManager
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIConnectorLink.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIConnectorLink.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e0e816851524cd8b740e668c790517742e7beac
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIConnectorLink.swift
+@@ -0,0 +1,206 @@
++// LocalAPIConnectorLink.swift
++// Hands the Local API port and Access token to the signed Voxt Connector over a Unix
++// socket, after one "Allow" (or none once the user chose Always Allow).
++
++import Foundation
++import Security
++
++final class LocalAPIConnectorLink: @unchecked Sendable {
++    enum Decision: Sendable { case allowAlways, allowOnce, deny }
++
++    static let defaultConnectorBundleIdentifier = "com.voxt.VoxtConnector"
++
++    /// The Connector's bundle ID: VoxtConnectorBundleIdentifier in Voxt's Info.plist names a renamed
++    /// Connector. Anything that is not a bundle ID is ignored, since the value goes into a code
++    /// requirement, where a quote would end the identifier string.
++    static func connectorBundleIdentifier(info: [String: Any]? = Bundle.main.infoDictionary) -> String {
++        guard let identifier = info?["VoxtConnectorBundleIdentifier"] as? String, !identifier.isEmpty,
++              identifier.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") })
++        else { return defaultConnectorBundleIdentifier }
++        return identifier
++    }
++
++    /// The Connector must be signed by Voxt's own team (read at runtime, so no team ID is
++    /// built in), with its bundle ID and the hardened runtime.
++    static func connectorRequirement(team: String, identifier: String = connectorBundleIdentifier()) -> String {
++        #"anchor apple generic and certificate leaf[subject.OU] = ""# + team + #"" and identifier ""# + identifier + #"""#
++    }
++    static var defaultPath: String { socketPath() }
++
++    /// Where Voxt Connector finds the socket. In the sandbox the home folder is Voxt's container,
++    /// ~/Library/Containers/<bundle ID>/Data, and the socket sits at its top: a socket path holds
++    /// at most 103 bytes, too few for Application Support inside the container. The Connector
++    /// derives the same path from Voxt's bundle ID, so the link needs no extra entitlement.
++    static func socketPath(environment: [String: String] = ProcessInfo.processInfo.environment,
++                           home: URL = FileManager.default.homeDirectoryForCurrentUser) -> String {
++        environment["APP_SANDBOX_CONTAINER_ID"] != nil
++            ? home.appending(path: "connector.sock").path
++            : home.appending(path: "Library/Application Support/Voxt/connector.sock").path
++    }
++
++    private let path: String
++    private let verifyPeer: (Int32) -> Bool
++    private let isRemembered: () -> Bool
++    private let remember: () -> Void
++    private let ask: () async -> Decision
++    private let credentials: () -> (port: Int, token: String)?
++    private let lock = NSLock()
++    private var listener: Int32 = -1
++
++    /// `team` is Voxt's own signing team; nil (ad-hoc or unsigned build) rejects every peer, and
++    /// the app doesn't start the link at all, so the Connector falls back to manual entry.
++    init(team: String? = LocalAPIConnectorLink.ownTeamIdentifier(), path: String = LocalAPIConnectorLink.defaultPath,
++         verifyPeer: ((Int32) -> Bool)? = nil,
++         isRemembered: @escaping () -> Bool, remember: @escaping () -> Void,
++         ask: @escaping () async -> Decision, credentials: @escaping () -> (port: Int, token: String)?) {
++        self.path = path
++        if let verifyPeer {
++            self.verifyPeer = verifyPeer
++        } else if let team {
++            let identifier = LocalAPIConnectorLink.connectorBundleIdentifier()
++            let requirement = LocalAPIConnectorLink.connectorRequirement(team: team, identifier: identifier)
++            self.verifyPeer = { LocalAPIConnectorLink.verifyConnector($0, requirement: requirement) }
++        } else {
++            self.verifyPeer = { _ in false }
++        }
++        self.isRemembered = isRemembered
++        self.remember = remember
++        self.ask = ask
++        self.credentials = credentials
++    }
++
++    /// Serves one Connector request on an accepted connection, then closes it.
++    func handle(_ fd: Int32) async {
++        defer { close(fd) }
++        var timeout = timeval(tv_sec: 5, tv_usec: 0)
++        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
++        guard let request = readLine(fd), request.contains(#""op":"connect""#) else { return }
++        // No dialog and no token for a process that isn't the signed Connector.
++        guard verifyPeer(fd) else { return send(["status": "rejected", "reason": "signature"], to: fd) }
++        guard let credentials = credentials() else { return send(["status": "unavailable"], to: fd) }
++        func approved(alwaysAllowed: Bool) -> [String: Any] {
++            // The Connector connects silently at launch only after Always Allow.
++            ["status": "approved", "port": credentials.port, "token": credentials.token, "alwaysAllowed": alwaysAllowed]
++        }
++        if isRemembered() { return send(approved(alwaysAllowed: true), to: fd) }
++        send(["status": "pending"], to: fd)
++        switch await ask() {
++        case .allowAlways:
++            remember()
++            send(approved(alwaysAllowed: true), to: fd)
++        case .allowOnce:
++            send(approved(alwaysAllowed: false), to: fd)
++        case .deny:
++            send(["status": "denied"], to: fd)
++        }
++    }
++
++    func start() throws {
++        let directory = (path as NSString).deletingLastPathComponent
++        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true,
++                                                attributes: [.posixPermissions: 0o700])
++        chmod(directory, 0o700)
++        unlink(path)
++        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
++        var address = sockaddr_un()
++        address.sun_family = sa_family_t(AF_UNIX)
++        let bytes = Array(path.utf8)
++        guard fd >= 0, bytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
++            if fd >= 0 { close(fd) }
++            throw POSIXError(.ENAMETOOLONG)
++        }
++        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes + [0]) }
++        let bound = withUnsafePointer(to: &address) {
++            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
++        }
++        guard bound == 0, chmod(path, 0o600) == 0, listen(fd, 4) == 0 else {
++            let code = errno
++            close(fd)
++            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
++        }
++        lock.withLock { listener = fd }
++        Thread.detachNewThread { [weak self] in
++            while true {
++                let client = accept(fd, nil, nil)
++                guard client >= 0 else { return }
++                guard let self else { close(client); return }
++                Task { await self.handle(client) }
++            }
++        }
++    }
++
++    func stop() {
++        let fd = lock.withLock { () -> Int32 in let fd = listener; listener = -1; return fd }
++        guard fd >= 0 else { return }
++        shutdown(fd, SHUT_RDWR)
++        close(fd)
++        unlink(path)
++    }
++
++    private func readLine(_ fd: Int32) -> String? {
++        var data = Data()
++        var byte: UInt8 = 0
++        while data.count < 1024, read(fd, &byte, 1) == 1 {
++            if byte == 0x0A { return String(decoding: data, as: UTF8.self) }
++            data.append(byte)
++        }
++        return nil
++    }
++
++    private func send(_ fields: [String: Any], to fd: Int32) {
++        var message = fields
++        message["v"] = 1
++        guard var data = try? JSONSerialization.data(withJSONObject: message, options: [.sortedKeys]) else { return }
++        data.append(0x0A)
++        _ = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
++    }
++
++    /// The peer must be the Connector signed by our team with the hardened runtime; without
++    /// the runtime an injected library passed the signature check in the fixture.
++    static func ownTeamIdentifier() -> String? {
++        var code: SecCode?
++        var staticCode: SecStaticCode?
++        var info: CFDictionary?
++        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
++              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
++              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess
++        else { return nil }
++        return (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String
++    }
++
++    static func verifyConnector(_ fd: Int32, requirement requirementText: String) -> Bool {
++        var token = audit_token_t()
++        var size = socklen_t(MemoryLayout<audit_token_t>.size)
++        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &size) == 0 else { return false }
++        var requirement: SecRequirement?
++        guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess,
++              let requirement else { return false }
++        let tokenData = withUnsafeBytes(of: token) { Data($0) }
++        var code: SecCode?
++        var staticCode: SecStaticCode?
++        let lookup = SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributeAudit: tokenData] as CFDictionary, [], &code)
++        guard lookup == errSecSuccess, let code,
++              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode
++        else { return false }
++        return acceptsPeer(
++            runningCodeValid: SecCodeCheckValidity(code, [], requirement) == errSecSuccess,
++            bundleOnDiskValid: SecStaticCodeCheckValidity(staticCode, SecCSFlags(rawValue: kSecCSStrictValidate), requirement) == errSecSuccess,
++            hardenedRuntime: hasHardenedRuntime(staticCode))
++    }
++
++    /// Every check must pass. The running code alone accepted a Connector whose bundle had a file
++    /// added after signing, so its bundle on disk is checked too. In the App Sandbox the look-up of
++    /// the peer's code is refused (EPERM) unless that code is somewhere the sandbox may read, which
++    /// for an app is /Applications; such a Connector falls back to manual entry.
++    static func acceptsPeer(runningCodeValid: Bool, bundleOnDiskValid: Bool, hardenedRuntime: Bool) -> Bool {
++        runningCodeValid && bundleOnDiskValid && hardenedRuntime
++    }
++
++    /// Without the hardened runtime an injected library passed the signature check in the fixture.
++    private static func hasHardenedRuntime(_ staticCode: SecStaticCode) -> Bool {
++        var info: CFDictionary?
++        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
++              let flags = (info as? [String: Any])?[kSecCodeInfoFlags as String] as? UInt32 else { return false }
++        return flags & 0x10000 != 0
++    }
++}
+diff --git a/Voxt/Voxt/Settings/Shell/AppPreferenceKey.swift b/Voxt/Voxt/Settings/Shell/AppPreferenceKey.swift
+index 86d789e539722036a2bf0e7fff7ea458a0133b3c..914601040987b51b8c49fd91302744ef37660402 100644
+--- a/Voxt/Voxt/Settings/Shell/AppPreferenceKey.swift
++++ b/Voxt/Voxt/Settings/Shell/AppPreferenceKey.swift
+@@ -38,6 +38,7 @@ enum AppPreferenceKey {
+     static let useHfMirror = "useHfMirror"
+     nonisolated static let localAPIServerEnabled = "localAPIServerEnabled"
+     nonisolated static let localAPIServerPort = "localAPIServerPort"
++    nonisolated static let localAPIConnectorAlwaysAllowed = "localAPIConnectorAlwaysAllowed"
+     static let modelDownloadSourceSelections = "modelDownloadSourceSelections"
+     static let hiddenModelVisibilityIDs = "hiddenModelVisibilityIDs"
+     nonisolated static let hotkeyInputType = "hotkeyInputType"
+diff --git a/Voxt/Voxt/en.lproj/Localizable.strings b/Voxt/Voxt/en.lproj/Localizable.strings
+index 48f98b5ff8bbcdf0a5a1ed3b1b12f30ac2db8914..3fedabf9a892c73b462f7ac203d469d0657ac7f3 100644
+--- a/Voxt/Voxt/en.lproj/Localizable.strings
++++ b/Voxt/Voxt/en.lproj/Localizable.strings
+@@ -1906,6 +1906,11 @@
+ "No text model is available. Choose one in Voxt Settings > Transcription." = "No text model is available. Choose one in Voxt Settings > Transcription.";
+ "The selected text model is configured to skip enhancement." = "The selected text model is configured to skip enhancement.";
+ "The selected text model cannot run this operation." = "The selected text model cannot run this operation.";
++"Allow Voxt Connector to use Voxt?" = "Allow Voxt Connector to use Voxt?";
++"It will forward dictations from your paired iPhone to Voxt on this Mac." = "It will forward dictations from your paired iPhone to Voxt on this Mac.";
++"Always Allow" = "Always Allow";
++"Allow Once" = "Allow Once";
++"Don't Allow" = "Don't Allow";
+ 
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences.";
+diff --git a/Voxt/Voxt/ja.lproj/Localizable.strings b/Voxt/Voxt/ja.lproj/Localizable.strings
+index a8883fd7d3934ced8b3592e3df309017ba30bf35..586c1837e323aeae5f32d90b34d445ff54e11c65 100644
+--- a/Voxt/Voxt/ja.lproj/Localizable.strings
++++ b/Voxt/Voxt/ja.lproj/Localizable.strings
+@@ -1859,6 +1859,11 @@
+ "No text model is available. Choose one in Voxt Settings > Transcription." = "使えるテキストモデルがありません。Voxt 設定 > 文字起こし で選んでください。";
+ "The selected text model is configured to skip enhancement." = "選択中のテキストモデルは補正をスキップする設定です。";
+ "The selected text model cannot run this operation." = "選択中のテキストモデルではこの操作を実行できません。";
++"Allow Voxt Connector to use Voxt?" = "Voxt Connector に Voxt の使用を許可しますか？";
++"It will forward dictations from your paired iPhone to Voxt on this Mac." = "ペアリングした iPhone の音声入力を、この Mac の Voxt に転送します。";
++"Always Allow" = "常に許可";
++"Allow Once" = "今回のみ許可";
++"Don't Allow" = "許可しない";
+ 
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "句読点と段落の流れを整えます。例：話し言葉の間を読みやすい文にします。";
+diff --git a/Voxt/Voxt/zh-Hans.lproj/Localizable.strings b/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
+index 44607a7222a831d88432c77a957e2759235b6bba..b38308e7e1d6af168e6ecb0992535bcfb84b7a9f 100644
+--- a/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
++++ b/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
+@@ -1906,6 +1906,11 @@
+ "No text model is available. Choose one in Voxt Settings > Transcription." = "没有可用的文本模型。请在 Voxt 设置 > 转写 中选择一个。";
+ "The selected text model is configured to skip enhancement." = "所选文本模型设置为跳过增强。";
+ "The selected text model cannot run this operation." = "所选文本模型无法执行此操作。";
++"Allow Voxt Connector to use Voxt?" = "允许 Voxt Connector 使用 Voxt？";
++"It will forward dictations from your paired iPhone to Voxt on this Mac." = "它会把已配对 iPhone 上的听写转交给这台 Mac 上的 Voxt。";
++"Always Allow" = "始终允许";
++"Allow Once" = "允许一次";
++"Don't Allow" = "不允许";
+ 
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "补全标点和段落节奏。例如：口语停顿会整理成可读句子。";
+diff --git a/Voxt/VoxtTests/LocalAPIConnectorLinkTests.swift b/Voxt/VoxtTests/LocalAPIConnectorLinkTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f7d81911154f9ca4e9428f7410232ee7d0aadaa
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIConnectorLinkTests.swift
+@@ -0,0 +1,125 @@
++// LocalAPIConnectorLinkTests.swift
++// Voxt hands its port and Access token to the signed Voxt Connector over a Unix socket,
++// after one "Allow".
++
++import XCTest
++@testable import Voxt
++
++final class LocalAPIConnectorLinkTests: XCTestCase {
++    private func pair() -> (connector: Int32, voxt: Int32) {
++        var fds: [Int32] = [0, 0]
++        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds), 0)
++        return (fds[0], fds[1])
++    }
++
++    private func exchange(_ server: LocalAPIConnectorLink) async -> [String] {
++        let (connector, voxt) = pair()
++        _ = #"{"v":1,"op":"connect"}"#.appending("\n").withCString { write(connector, $0, strlen($0)) }
++        await server.handle(voxt)
++        var lines: [String] = []
++        var buffer = [UInt8](repeating: 0, count: 4096)
++        var timeout = timeval(tv_sec: 1, tv_usec: 0)
++        setsockopt(connector, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
++        let count = read(connector, &buffer, buffer.count)
++        if count > 0 { lines = String(decoding: buffer[0..<count], as: UTF8.self).split(separator: "\n").map(String.init) }
++        close(connector)
++        return lines
++    }
++
++    func testRememberedSignedConnectorGetsCredentialsWithoutADialog() async {
++        var asked = false
++        let server = LocalAPIConnectorLink(verifyPeer: { _ in true }, isRemembered: { true }, remember: {},
++                                         ask: { asked = true; return .deny }, credentials: { (47920, "fixture-token") })
++        let lines = await exchange(server)
++        XCTAssertEqual(lines, [#"{"alwaysAllowed":true,"port":47920,"status":"approved","token":"fixture-token","v":1}"#])
++        XCTAssertFalse(asked)
++    }
++
++    func testFirstConnectionAsksOnceAndCanBeRemembered() async {
++        var remembered = false
++        let server = LocalAPIConnectorLink(verifyPeer: { _ in true }, isRemembered: { remembered }, remember: { remembered = true },
++                                         ask: { .allowAlways }, credentials: { (47920, "fixture-token") })
++        let lines = await exchange(server)
++        XCTAssertEqual(lines.first, #"{"status":"pending","v":1}"#)
++        XCTAssertEqual(lines.last, #"{"alwaysAllowed":true,"port":47920,"status":"approved","token":"fixture-token","v":1}"#)
++        XCTAssertTrue(remembered)
++        let once = LocalAPIConnectorLink(verifyPeer: { _ in true }, isRemembered: { false }, remember: {},
++                                       ask: { .allowOnce }, credentials: { (47920, "fixture-token") })
++        let onceLines = await exchange(once)
++        XCTAssertEqual(onceLines.last, #"{"alwaysAllowed":false,"port":47920,"status":"approved","token":"fixture-token","v":1}"#,
++                       "the Connector stores its launch flag only for Always Allow")
++    }
++
++    func testDeniedOrUnsignedConnectorGetsNoToken() async {
++        let denied = LocalAPIConnectorLink(verifyPeer: { _ in true }, isRemembered: { false }, remember: {},
++                                         ask: { .deny }, credentials: { (47920, "fixture-token") })
++        let deniedLines = await exchange(denied)
++        XCTAssertEqual(deniedLines.last, #"{"status":"denied","v":1}"#)
++        XCTAssertFalse(deniedLines.joined().contains("fixture-token"))
++        var asked = false
++        let unsigned = LocalAPIConnectorLink(verifyPeer: { _ in false }, isRemembered: { true }, remember: {},
++                                           ask: { asked = true; return .allowAlways }, credentials: { (47920, "fixture-token") })
++        let unsignedLines = await exchange(unsigned)
++        XCTAssertEqual(unsignedLines, [#"{"reason":"signature","status":"rejected","v":1}"#])
++        XCTAssertFalse(asked, "no dialog for a process that isn't the signed Connector")
++    }
++
++    func testSocketIsPrivateToTheUser() throws {
++        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("cl-\(UUID().uuidString.prefix(8))")
++        let server = LocalAPIConnectorLink(path: directory.appendingPathComponent("c.sock").path, verifyPeer: { _ in false },
++                                         isRemembered: { false }, remember: {}, ask: { .deny }, credentials: { nil })
++        try server.start()
++        defer { server.stop(); try? FileManager.default.removeItem(at: directory) }
++        let socketMode = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("c.sock").path)[.posixPermissions] as? Int
++        let directoryMode = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int
++        XCTAssertEqual(socketMode, 0o600)
++        XCTAssertEqual(directoryMode, 0o700)
++    }
++
++    func testRequirementUsesVoxtsOwnTeamAndTheConnectorBundle() {
++        XCTAssertEqual(LocalAPIConnectorLink.connectorRequirement(team: "ABCDE12345"),
++                       #"anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345" and identifier "com.voxt.VoxtConnector""#)
++        XCTAssertEqual(LocalAPIConnectorLink.connectorRequirement(team: "ABCDE12345", identifier: "org.example.Connector"),
++                       #"anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345" and identifier "org.example.Connector""#)
++    }
++
++    func testInfoPlistCanNameARenamedConnector() {
++        XCTAssertEqual(LocalAPIConnectorLink.connectorBundleIdentifier(info: nil), "com.voxt.VoxtConnector")
++        XCTAssertEqual(LocalAPIConnectorLink.connectorBundleIdentifier(info: [:]), "com.voxt.VoxtConnector")
++        XCTAssertEqual(LocalAPIConnectorLink.connectorBundleIdentifier(info: ["VoxtConnectorBundleIdentifier": "org.example.Connector"]),
++                       "org.example.Connector")
++        // The value goes into a code requirement, where a quote would end the identifier string.
++        for bad: Any in [#"x" or identifier "y"#, "", 7] {
++            XCTAssertEqual(LocalAPIConnectorLink.connectorBundleIdentifier(info: ["VoxtConnectorBundleIdentifier": bad]),
++                           "com.voxt.VoxtConnector")
++        }
++    }
++
++    func testUnsignedVoxtRejectsEveryConnectorWithoutADialog() async {
++        var asked = false
++        let server = LocalAPIConnectorLink(team: nil, isRemembered: { true }, remember: {},
++                                         ask: { asked = true; return .allowAlways }, credentials: { (47920, "fixture-token") })
++        let lines = await exchange(server)
++        XCTAssertEqual(lines, [#"{"reason":"signature","status":"rejected","v":1}"#])
++        XCTAssertFalse(asked)
++    }
++
++    func testSandboxedVoxtPutsTheSocketAtTheTopOfItsContainer() {
++        let container = URL(fileURLWithPath: "/Users/someone-with-a-long-name/Library/Containers/com.voxt.Voxt/Data")
++        let sandboxed = LocalAPIConnectorLink.socketPath(environment: ["APP_SANDBOX_CONTAINER_ID": "com.voxt.Voxt"], home: container)
++        XCTAssertEqual(sandboxed, container.path + "/connector.sock")
++        // A socket path holds at most 103 bytes; Application Support inside the container would not fit.
++        XCTAssertLessThanOrEqual(sandboxed.utf8.count, 103)
++        let home = URL(fileURLWithPath: "/Users/someone")
++        XCTAssertEqual(LocalAPIConnectorLink.socketPath(environment: [:], home: home),
++                       "/Users/someone/Library/Application Support/Voxt/connector.sock")
++    }
++
++    func testAPeerIsTrustedOnlyWhenEveryCheckPasses() {
++        XCTAssertTrue(LocalAPIConnectorLink.acceptsPeer(runningCodeValid: true, bundleOnDiskValid: true, hardenedRuntime: true))
++        XCTAssertFalse(LocalAPIConnectorLink.acceptsPeer(runningCodeValid: true, bundleOnDiskValid: false, hardenedRuntime: true),
++                       "a bundle changed after signing is refused even though its running code is valid")
++        XCTAssertFalse(LocalAPIConnectorLink.acceptsPeer(runningCodeValid: false, bundleOnDiskValid: true, hardenedRuntime: true))
++        XCTAssertFalse(LocalAPIConnectorLink.acceptsPeer(runningCodeValid: true, bundleOnDiskValid: true, hardenedRuntime: false))
++    }
++}
+diff --git a/Voxt/docs/LocalAPI.md b/Voxt/docs/LocalAPI.md
+index 8ea6cb2f935d23cc80f3316195c5c9eac09dd0d8..e88f352ed4c525d81fcf8eb2da10ee3734c1be27 100644
+--- a/Voxt/docs/LocalAPI.md
++++ b/Voxt/docs/LocalAPI.md
+@@ -23,7 +23,11 @@ curl -H "Authorization: Bearer $VOXT_TOKEN" -H "Content-Type: audio/wav" \
+ 
+ Voxt binds `127.0.0.1` only, on port 47910 by default (change it in the same card). Other computers and phones cannot connect directly. To use it from another device, put your own tunnel in front of it, for example `tailscale serve --https=47911 http://127.0.0.1:47910`. Use a different public port: macOS refuses Voxt's bind when the tunnel already holds the same port.
+ 
+-Every request needs `Authorization: Bearer <token>`. **Regenerate** issues a new token and disconnects existing clients.
++Every request needs `Authorization: Bearer <token>`.
++
++Voxt Connector, the menu bar app that carries dictations from Voxt Mobile on an iPhone, does not need the token copied by hand. When it is signed by the same team as Voxt, it asks for the port and token over a Unix socket at the top of Voxt's sandbox container, `~/Library/Containers/com.voxt.Voxt/Data/connector.sock` (`~/Library/Application Support/Voxt/connector.sock` for an unsandboxed build), and Voxt asks you once: **Always Allow**, **Allow Once** or **Don't Allow**. Voxt checks the Connector's code signature (Voxt's own team, the bundle ID `com.voxt.VoxtConnector` or the one in `VoxtConnectorBundleIdentifier` of Voxt's Info.plist, and the hardened runtime) before it answers; an ad-hoc or unsigned Voxt does not open the socket.
++
++In the App Sandbox (the release build), macOS lets Voxt inspect another process's code only when that code is somewhere the sandbox may read, which for an app is `/Applications`. So **install Voxt Connector in /Applications**. Anywhere else the look-up is refused, Voxt rejects the Connector, and the Connector shows its manual entry: copy the port and token from this card. Voxt checks both the Connector's running code and its bundle on disk, so a bundle changed after signing is refused too. After **Always Allow**, a Connector that passes these checks gets the token without a prompt.
+ 
+ ## Endpoints
+ 

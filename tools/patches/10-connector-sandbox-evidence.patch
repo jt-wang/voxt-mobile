@@ -1,0 +1,254 @@
+diff --git a/Voxt/Mobile/contract/README.md b/Voxt/Mobile/contract/README.md
+index 0e002dae54a4956657532f9353b9bb5e7f1f473b..0343214c78d2c72c07d88300b5b01f7f09c6b435 100644
+--- a/Voxt/Mobile/contract/README.md
++++ b/Voxt/Mobile/contract/README.md
+@@ -1,11 +1,7 @@
+ # Local API contract
+ 
+-Example JSON of the Local API ([`Voxt/docs/LocalAPI.md`](../../docs/LocalAPI.md)), shared by both sides:
+-`Voxt/VoxtTests/LocalAPIContractTests.swift` checks them against Voxt's real output, and Voxt Mobile's
+-tests decode them. Run the Voxt test with `VOXT_CONTRACT_RECORD=1` to rewrite them after a schema change.
++Example JSON of the Local API ([`Voxt/docs/LocalAPI.md`](../../docs/LocalAPI.md)), shared by both sides: `Voxt/VoxtTests/LocalAPIContractTests.swift` checks them against Voxt's real output, and Voxt Mobile's tests decode them. Run the Voxt test with `VOXT_CONTRACT_RECORD=1` to rewrite them after a schema change.
+ 
+ - `id`, `asrMs` and `enhanceMs` hold fixed values; real responses differ on every request.
+-- `compose-request.json` has every option field Voxt reads. Voxt ignores option keys it does not read,
+-  so a client may send its own (Voxt Mobile also sends `literalDictation`); compare a client's body
+-  with the fixture on the fixture's keys.
++- `compose-request.json` has every option field Voxt reads. Voxt ignores option keys it does not read, so a client may send its own (Voxt Mobile also sends `literalDictation`); compare a client's body with the fixture on the fixture's keys.
+ - `errors.json` maps a name to the status and `{"error": "…"}` body of one failure.
+diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/README.md b/Voxt/Mobile/docs/evidence/connector-link-sandbox/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..234369afbe200f3978b024ce38bd66e350571327
+--- /dev/null
++++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/README.md
+@@ -0,0 +1,93 @@
++# Connector link under the App Sandbox
++
++What this checks: a sandboxed Voxt (the release build) hands its port and token only to a Voxt Connector signed by the same team, found where both sides look for the socket.
++
++The server is Voxt's own `Voxt/Core/LocalAPI/LocalAPIConnectorLink.swift` in a two-file app that has only the `com.apple.security.app-sandbox` entitlement. The client is Voxt Connector's own `ConnectorLink.swift` and `ConnectorIdentity.swift` (in `Mobile/connector/VoxtConnectionKit`). Both use test bundle IDs (`com.voxt.Voxt.linkcheck`, `com.voxt.VoxtConnector.linkcheck`) so a Voxt installed on the same Mac is not touched. No Voxt UI, microphone or model runs.
++
++## Build and sign
++
++`IDENTITY` is a Developer ID Application identity; both apps must use the same team.
++
++```sh
++L=../../../../Voxt/Core/LocalAPI K=../../../connector/VoxtConnectionKit/Sources/VoxtConnectionKit
++mkdir -p LinkServer.app/Contents/MacOS srv cli
++cp server-Info.plist LinkServer.app/Contents/Info.plist; cp server.swift srv/main.swift; cp client.swift cli/main.swift
++swiftc -O -o LinkServer.app/Contents/MacOS/LinkServer $L/LocalAPIConnectorLink.swift srv/main.swift
++swiftc -O -o linkclient $K/ConnectorLink.swift $K/ConnectorIdentity.swift cli/main.swift \
++  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker client-Info.plist
++codesign --force --options runtime --timestamp=none --entitlements sandbox.entitlements --sign "$IDENTITY" LinkServer.app
++mkdir -p "LinkCheck-stage/Voxt LinkCheck.app/Contents/MacOS"
++cp linkclient "LinkCheck-stage/Voxt LinkCheck.app/Contents/MacOS/"; cp client-Info.plist "LinkCheck-stage/Voxt LinkCheck.app/Contents/Info.plist"
++codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "LinkCheck-stage/Voxt LinkCheck.app"
++codesign --force --options runtime --timestamp=none --identifier com.voxt.VoxtConnector.linkcheck --sign "$IDENTITY" linkclient
++```
++
++`run-applications.sh` copies the client bundle to `/Applications/Voxt LinkCheck.app` for one run and removes it on exit. `run-broken-fresh.sh` checks a bundle with a broken seal against a server that never saw the intact one.
++
++## Results
++
++Server start, inside the sandbox:
++
++```
++server sandbox container: com.voxt.Voxt.linkcheck
++server socket: ~/Library/Containers/com.voxt.Voxt.linkcheck/Data/connector.sock (72 bytes)
++server requires connector: com.voxt.VoxtConnector.linkcheck
++server listening
++```
++
++`./run-applications.sh`, client lines, then the server's log of each peer check:
++
++```
++== client in /Applications, signed
++client approved port=47999 token=fixture-token alwaysAllowed=true
++== same bundle, seal broken by an added resource
++client failed: rejectedBySignature
++== client outside /Applications
++client failed: rejectedBySignature
++
++server peer check start, guest lookup 0
++server peer check true after 4 ms
++server peer check start, guest lookup 0
++server peer check false after 5 ms
++server peer check start, guest lookup 100001
++server peer check false after 0 ms
++```
++
++`./run-broken-fresh.sh`:
++
++```
++client failed: rejectedBySignature
++server peer check start, guest lookup 0
++server peer check false after 5 ms
++```
++
++What the results show:
++
++- The socket at the top of the container fits the 103-byte limit of a socket path (72 bytes here); Application Support inside the container is 95 bytes for a two-letter user name and too long beyond about ten.
++- The unsandboxed client, signed by the same team, connected into Voxt's container without a prompt.
++- The sandbox lets Voxt look up a peer's code only when the peer's executable is somewhere the sandbox may read: the client in `/Applications` passes (lookup 0); the same client elsewhere is refused (lookup 100001, EPERM), and the Connector then uses manual entry.
++- Before the on-disk check was added, the bundle with a file added after signing was approved by the running-code check alone. With `SecStaticCodeCheckValidity` (strict) against the same requirement it is refused.
++
++## Voxt unit tests
++
++From `Voxt/`, unsigned as in CI:
++
++```sh
++xcodebuild build-for-testing -project Voxt.xcodeproj -scheme Voxt -configuration TestDebug \
++  -destination platform=macOS -derivedDataPath build/derived -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO
++xcodebuild test-without-building -xctestrun build/derived/Build/Products/Voxt_*.xctestrun -destination platform=macOS \
++  -only-testing:VoxtTests/LocalAPIComposePromptTests -only-testing:VoxtTests/LocalAPIConnectorLinkTests \
++  -only-testing:VoxtTests/LocalAPIContractTests -only-testing:VoxtTests/LocalAPIDictationPipelineTests \
++  -only-testing:VoxtTests/LocalAPIHTTPTests -only-testing:VoxtTests/LocalAPIRequestHandlerTests \
++  -only-testing:VoxtTests/LocalAPIRouterTests -only-testing:VoxtTests/LocalAPIServerTests \
++  -only-testing:VoxtTests/LocalAPISettingsTests -only-testing:VoxtTests/ASRHintSettingsTests \
++  -only-testing:VoxtTests/EnhancementLanguageGuardTests -only-testing:VoxtTests/LLMExecutionPlanCompilerTests
++```
++
++```
++** TEST BUILD SUCCEEDED **
++Executed 228 tests, with 0 failures (0 unexpected)
++** TEST EXECUTE SUCCEEDED **
++```
++
++An app built with `CODE_SIGNING_ALLOWED=NO` is only ad-hoc linker-signed, with no team and no entitlements (`codesign -dv`: `flags=0x20002(adhoc,linker-signed)`, `TeamIdentifier=not set`), so it runs without the sandbox and does not open the Connector link. The sandbox needs a signed build, as above.
+diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/client-Info.plist b/Voxt/Mobile/docs/evidence/connector-link-sandbox/client-Info.plist
+new file mode 100644
+index 0000000000000000000000000000000000000000..483dbe036354c3854021c938a61429eb66c97d1c
+--- /dev/null
++++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/client-Info.plist
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0"><dict>
++<key>CFBundleIdentifier</key><string>com.voxt.VoxtConnector.linkcheck</string>
++<key>CFBundleExecutable</key><string>linkclient</string>
++<key>CFBundlePackageType</key><string>APPL</string>
++<key>VoxtBundleIdentifiers</key><string>com.voxt.Voxt.linkcheck</string>
++</dict></plist>
+diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/client.swift b/Voxt/Mobile/docs/evidence/connector-link-sandbox/client.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f3566644936119d4476dd2501af65b8c071a0ad
+--- /dev/null
++++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/client.swift
+@@ -0,0 +1,16 @@
++// Runs Voxt Connector's real ConnectorLink once and prints Voxt's answer.
++import Foundation
++setbuf(stdout, nil)
++print("client team: \(PeerSignature.ownTeamIdentifier() ?? "none")")
++print("client candidates: \(ConnectorLink.socketPaths())")
++let done = DispatchSemaphore(value: 0)
++Task {
++    do {
++        let grant = try await ConnectorLink(replyTimeout: 10).authorize()
++        print("client approved port=\(grant.port) token=\(grant.token) alwaysAllowed=\(grant.alwaysAllowed)")
++    } catch {
++        print("client failed: \(error)")
++    }
++    done.signal()
++}
++done.wait()
+diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/run-applications.sh b/Voxt/Mobile/docs/evidence/connector-link-sandbox/run-applications.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f7b2ec56e9f0ee50a4b923ed57dad27c318e460
+--- /dev/null
++++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/run-applications.sh
+@@ -0,0 +1,20 @@
++#!/bin/bash
++# One run: the sandboxed link server, the signed client bundle in /Applications (accepted), the same
++# bundle with a broken seal (rejected), and the client outside /Applications (rejected). The bundle
++# in /Applications exists only while this script runs.
++set -u
++APP="/Applications/Voxt LinkCheck.app"
++SP=""
++cleanup() { [ -n "$SP" ] && kill "$SP" 2>/dev/null; rm -rf "$APP"; }
++trap cleanup EXIT
++[ -e "$APP" ] && { echo "refusing: $APP already exists"; exit 1; }
++./LinkServer.app/Contents/MacOS/LinkServer > server.log 2>&1 & SP=$!
++sleep 2
++ditto "LinkCheck-stage/Voxt LinkCheck.app" "$APP"
++echo "== client in /Applications, signed"
++perl -e 'alarm 15; exec { $ARGV[0] } @ARGV' "$APP/Contents/MacOS/linkclient" 2>&1; echo "exit=$?"
++echo "== same bundle, seal broken by an added resource"
++mkdir -p "$APP/Contents/Resources" && echo x > "$APP/Contents/Resources/added.txt"
++perl -e 'alarm 15; exec { $ARGV[0] } @ARGV' "$APP/Contents/MacOS/linkclient" 2>&1; echo "exit=$?"
++echo "== client outside /Applications"
++perl -e 'alarm 15; exec { $ARGV[0] } @ARGV' ./linkclient 2>&1; echo "exit=$?"
+diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/run-broken-fresh.sh b/Voxt/Mobile/docs/evidence/connector-link-sandbox/run-broken-fresh.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..700776d1a2b0c7fd854a75fb9ab1ee78ffce64f7
+--- /dev/null
++++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/run-broken-fresh.sh
+@@ -0,0 +1,11 @@
++#!/bin/bash
++# The broken-seal bundle against a server that never saw the good one.
++APP="/Applications/Voxt LinkCheck.app"
++SP=""
++trap '[ -n "$SP" ] && kill "$SP" 2>/dev/null; rm -rf "$APP"; echo "cleanup: $( [ -e "$APP" ] && echo still-there || echo removed )"' EXIT
++[ -e "$APP" ] && { echo "refusing: exists"; exit 1; }
++ditto "LinkCheck-stage/Voxt LinkCheck.app" "$APP"
++mkdir -p "$APP/Contents/Resources" && echo x > "$APP/Contents/Resources/added.txt"
++./LinkServer.app/Contents/MacOS/LinkServer > server.log 2>&1 & SP=$!
++sleep 2
++perl -e 'alarm 15; exec { $ARGV[0] } @ARGV' "$APP/Contents/MacOS/linkclient" 2>&1 | tail -1
+diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/sandbox.entitlements b/Voxt/Mobile/docs/evidence/connector-link-sandbox/sandbox.entitlements
+new file mode 100644
+index 0000000000000000000000000000000000000000..7366ffe71dba076fd9d70b17b89a5912180253d9
+--- /dev/null
++++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/sandbox.entitlements
+@@ -0,0 +1,3 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0"><dict><key>com.apple.security.app-sandbox</key><true/></dict></plist>
+diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/server-Info.plist b/Voxt/Mobile/docs/evidence/connector-link-sandbox/server-Info.plist
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d85a51a7fa2bcacf693f3e4f92a89e446b43076
+--- /dev/null
++++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/server-Info.plist
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0"><dict>
++<key>CFBundleIdentifier</key><string>com.voxt.Voxt.linkcheck</string>
++<key>CFBundleExecutable</key><string>LinkServer</string>
++<key>CFBundlePackageType</key><string>APPL</string>
++<key>VoxtConnectorBundleIdentifier</key><string>com.voxt.VoxtConnector.linkcheck</string>
++</dict></plist>
+diff --git a/Voxt/Mobile/docs/evidence/connector-link-sandbox/server.swift b/Voxt/Mobile/docs/evidence/connector-link-sandbox/server.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..33a8db7ca714ff5f3106ac84715a5c88453b87b8
+--- /dev/null
++++ b/Voxt/Mobile/docs/evidence/connector-link-sandbox/server.swift
+@@ -0,0 +1,29 @@
++// Runs Voxt's real LocalAPIConnectorLink inside the App Sandbox for 60 seconds.
++import Foundation
++import Security
++setbuf(stdout, nil)
++let environment = ProcessInfo.processInfo.environment
++let path = LocalAPIConnectorLink.defaultPath
++print("server sandbox container: \(environment["APP_SANDBOX_CONTAINER_ID"] ?? "none")")
++print("server team: \(LocalAPIConnectorLink.ownTeamIdentifier() ?? "none")")
++print("server socket: \(path) (\(path.utf8.count) bytes)")
++print("server requires connector: \(LocalAPIConnectorLink.connectorBundleIdentifier())")
++let identifier = LocalAPIConnectorLink.connectorBundleIdentifier()
++let requirement = LocalAPIConnectorLink.connectorRequirement(team: LocalAPIConnectorLink.ownTeamIdentifier() ?? "", identifier: identifier)
++func timedCheck(_ fd: Int32) -> Bool {
++    let start = Date()
++    var token = audit_token_t()
++    var size = socklen_t(MemoryLayout<audit_token_t>.size)
++    _ = getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &size)
++    var code: SecCode?
++    let lookup = SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributeAudit: withUnsafeBytes(of: token) { Data($0) }] as CFDictionary, [], &code)
++    print("server peer check start, guest lookup \(lookup)")
++    let trusted = LocalAPIConnectorLink.verifyConnector(fd, requirement: requirement)
++    print("server peer check \(trusted) after \(Int(Date().timeIntervalSince(start) * 1000)) ms")
++    return trusted
++}
++let link = LocalAPIConnectorLink(verifyPeer: timedCheck, isRemembered: { true }, remember: {}, ask: { .deny }, credentials: { (47999, "fixture-token") })
++do { try link.start(); print("server listening") } catch { print("server start failed: \(error)"); exit(1) }
++Thread.sleep(forTimeInterval: 60)
++link.stop()
++print("server stopped")

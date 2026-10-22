@@ -88,7 +88,42 @@ import Testing
 
     @Test func requirementUsesTheConnectorsOwnTeamAndVoxtBundle() {
         #expect(ConnectorLink.voxtRequirement(team: "ABCDE12345") == #"anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345" and (identifier "com.voxt.Voxt" or identifier "com.voxt.Voxt.omni.dev")"#)
-        #expect(ConnectorLink.socketPath.hasSuffix("Library/Application Support/Voxt/connector.sock"))
+    }
+
+    @Test func socketIsLookedForInEachTrustedVoxtsContainerThenOutsideTheSandbox() {
+        let home = URL(fileURLWithPath: "/Users/someone")
+        #expect(ConnectorLink.socketPaths(identifiers: ["com.voxt.Voxt", "com.voxt.Voxt.omni.dev"], home: home) == [
+            "/Users/someone/Library/Containers/com.voxt.Voxt/Data/connector.sock",
+            "/Users/someone/Library/Containers/com.voxt.Voxt.omni.dev/Data/connector.sock",
+            "/Users/someone/Library/Application Support/Voxt/connector.sock",
+        ])
+    }
+
+    @Test func connectUsesTheFirstSocketThatAnswers() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "cl-\(UUID().uuidString.prefix(6))")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let stale = folder.appending(path: "stale.sock").path
+        let live = folder.appending(path: "live.sock").path
+        let staleListener = try Self.listen(at: stale)
+        close(staleListener)  // the file stays, nobody answers: what a quit Voxt leaves behind
+        let listener = try Self.listen(at: live)
+        defer { close(listener) }
+        let fd = try ConnectorLink.connectToVoxt(paths: [folder.appending(path: "missing.sock").path, stale, live])
+        close(fd)
+        #expect(throws: ConnectorLink.Failure.voxtNotRunning) { try ConnectorLink.connectToVoxt(paths: [stale]) }
+    }
+
+    private static func listen(at path: String) throws -> Int32 {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: Array(path.utf8) + [0]) }
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        guard bound == 0, Darwin.listen(fd, 1) == 0 else { close(fd); throw POSIXError(.EADDRINUSE) }
+        return fd
     }
 
     @Test func unsignedConnectorFallsBackToManualEntryWithoutConnecting() async {

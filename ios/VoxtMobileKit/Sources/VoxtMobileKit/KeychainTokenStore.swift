@@ -11,8 +11,19 @@ public final class KeychainTokenStore: TokenStoring {
         }
     }
 
+    /// Items are named after the app's bundle ID, so each signer's build has its own. A build
+    /// with earlier installs sets `VOXT_KEYCHAIN_SERVICE_PREFIX` to the names those installs
+    /// used; a new name would lose every upgraded phone's pairing.
+    public static func service(_ name: String, info: [String: Any]? = Bundle.main.infoDictionary) -> String {
+        let prefixKey = "VoxtKeychainServicePrefix"
+        if let prefix = info?[prefixKey] as? String, !prefix.isEmpty, !prefix.contains("$(") {
+            return prefix + "." + name
+        }
+        return [info?[kCFBundleIdentifierKey as String] as? String, name].compactMap { $0 }.joined(separator: ".")
+    }
+
     private let service: String
-    public init(service: String = "com.voxtmobile.app.pairing") { self.service = service }
+    public init(service: String = KeychainTokenStore.service("pairing")) { self.service = service }
 
     private var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,

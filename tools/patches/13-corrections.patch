@@ -1,0 +1,789 @@
+diff --git a/Voxt/Mobile/contract/capabilities.json b/Voxt/Mobile/contract/capabilities.json
+index d7900b8e84cea7e21be5388f9e117038018dbbf0..4efedddfdfa4d2025800fdcf1a372a72cbd15a2d 100644
+--- a/Voxt/Mobile/contract/capabilities.json
++++ b/Voxt/Mobile/contract/capabilities.json
+@@ -23,7 +23,8 @@
+     "capabilities",
+     "dictations",
+     "compose",
+-    "compose/prompts"
++    "compose/prompts",
++    "corrections"
+   ],
+   "locations" : {
+     "text" : "local",
+diff --git a/Voxt/Mobile/contract/correction-request.json b/Voxt/Mobile/contract/correction-request.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..03ef4f86c1c37fe564ce76161bd244d8b5688104
+--- /dev/null
++++ b/Voxt/Mobile/contract/correction-request.json
+@@ -0,0 +1,4 @@
++{
++  "edited": "Send the draft to Novo today.",
++  "original": "Send the draft to Nova today."
++}
+diff --git a/Voxt/Mobile/contract/correction-response.json b/Voxt/Mobile/contract/correction-response.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..325ff0af98fa5de53ca99860f75979990a996f0d
+--- /dev/null
++++ b/Voxt/Mobile/contract/correction-response.json
+@@ -0,0 +1,6 @@
++{
++  "correction" : {
++    "original" : "Nova",
++    "replacement" : "Novo"
++  }
++}
+diff --git a/Voxt/Voxt/App/LocalAPIFlow.swift b/Voxt/Voxt/App/LocalAPIFlow.swift
+index 316eb19410a384fbc89fc7f087fe0d3c91eb667f..d6689824f7b5331d76c511450a31292a9a39cac4 100644
+--- a/Voxt/Voxt/App/LocalAPIFlow.swift
++++ b/Voxt/Voxt/App/LocalAPIFlow.swift
+@@ -47,6 +47,13 @@ extension AppDelegate {
+             guard let self else { throw CancellationError() }
+             return try await self.composeLocalAPITranscript(text, options: options)
+         }
++        pipeline.correctHandler = { [weak self] request, instruction in
++            guard let self else { throw CancellationError() }
++            if let reason = LocalAPIComposePrompt.unavailabilityReason(for: self.localAPITextModel()) {
++                throw LocalAPIError(message: AppLocalization.localizedString(reason))
++            }
++            return try await self.composeTextStrictly(request.original, instruction: instruction)
++        }
+         let router = LocalAPIRouter(token: LocalAPISettings.token(), maxBodyBytes: LocalAPISettings.maxBodyBytes)
+         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+         let handler = LocalAPIRequestHandler.make(
+@@ -63,6 +70,9 @@ extension AppDelegate {
+             },
+             compose: { composeRequest in
+                 await pipeline.runCompose(composeRequest)
++            },
++            correct: { correction in
++                await pipeline.runCorrection(correction)
+             }
+         )
+         let server = LocalAPIServer(port: UInt16(port), maxBodyBytes: LocalAPISettings.maxBodyBytes, handler: handler)
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPICorrection.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPICorrection.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..97c95e7497b9031985cc03c61532f703c7a067ed
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPICorrection.swift
+@@ -0,0 +1,177 @@
++// LocalAPICorrection.swift
++// Extracts one full corrected word from a passage the user edited after a dictation. The selected text model
++// proposes the pair; this file only accepts a pair that is actually in both passages.
++
++import Foundation
++
++nonisolated struct LocalAPICorrectionRequest: Equatable, Sendable {
++    var original: String
++    var edited: String
++}
++
++nonisolated struct LocalAPICorrectionPair: Equatable, Sendable, Codable {
++    var original: String
++    var replacement: String
++}
++
++nonisolated enum LocalAPICorrectionFailure: Error {
++    case invalidJSON
++    case mismatch
++}
++
++nonisolated enum LocalAPICorrectionPrompt {
++    /// Instruction for the selected text model. The passages are the only evidence.
++    /// It has no few-shot examples, so an answer cannot be copied from one.
++    static func instruction(original: String, edited: String) -> String {
++        """
++        Extract only one full corrected word or name from the edit below.
++        Return the complete word, never a fragment of a larger word. A Chinese name is the whole name, not one character from it. An alphanumeric name such as Nova2 is the whole name, not the digit 2.
++        Ignore appended text, a deletion, a standalone number, punctuation, and a semantic rewrite.
++        If the edit is not one full-word correction, return only {"correction":null}.
++        Otherwise return only {"correction":{"original":"<full original word>","replacement":"<full corrected word>"}}.
++        Original passage:
++        \(original)
++        Edited passage:
++        \(edited)
++        """
++    }
++}
++
++nonisolated enum LocalAPICorrection {
++    /// Appends, complete-word deletions, punctuation, standalone numbers, and multi-word
++    /// rewrites are not corrections. A letter or digit inserted or deleted inside a word,
++    /// including Qwen2 to Qwen3, still goes to the model.
++    static func isIgnorable(original: String, edited: String) -> Bool {
++        let old = Array(original)
++        let new = Array(edited)
++        var prefix = 0
++        while prefix < min(old.count, new.count), old[prefix] == new[prefix] { prefix += 1 }
++        var suffix = 0
++        while suffix < min(old.count - prefix, new.count - prefix),
++              old[old.count - 1 - suffix] == new[new.count - 1 - suffix] { suffix += 1 }
++        let removed = Array(old[prefix..<(old.count - suffix)])
++        let added = Array(new[prefix..<(new.count - suffix)])
++        if removed.isEmpty || added.isEmpty {
++            let changed = removed + added
++            let spellingEdit = !changed.isEmpty && changed.allSatisfy { $0.isLetter || $0.isNumber }
++            let hasPreviousLetter = prefix > 0 && old[prefix - 1].isLetter && new[prefix - 1].isLetter
++            let hasFollowingLetter = prefix < old.count && prefix < new.count
++                && old[prefix].isLetter && new[prefix].isLetter
++            return !(spellingEdit && (hasPreviousLetter || hasFollowingLetter))
++        }
++        if removed.contains(where: \.isWhitespace) || added.contains(where: \.isWhitespace) { return true }
++        if removed.contains(where: \.isLetter) || added.contains(where: \.isLetter) { return false }
++        let numeric = removed.contains(where: \.isNumber) || added.contains(where: \.isNumber)
++        if numeric && (touchesLetter(old, start: prefix, end: old.count - suffix)
++            || touchesLetter(new, start: prefix, end: new.count - suffix)) {
++            return false
++        }
++        return true
++    }
++
++    /// The whole trimmed model string must be `{"correction":null}` or one pair object.
++    /// A pair that is not the full changed word throws instead of being guessed.
++    static func interpret(modelOutput: String, original: String, edited: String) throws -> LocalAPICorrectionPair? {
++        let trimmed = modelOutput.trimmingCharacters(in: .whitespacesAndNewlines)
++        guard let data = trimmed.data(using: .utf8),
++              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
++              Set(object.keys) == ["correction"] else {
++            throw LocalAPICorrectionFailure.invalidJSON
++        }
++        if object["correction"] is NSNull { return nil }
++        guard let fields = object["correction"] as? [String: Any],
++              Set(fields.keys) == ["original", "replacement"],
++              let pairOriginal = fields["original"] as? String,
++              let pairReplacement = fields["replacement"] as? String else {
++            throw LocalAPICorrectionFailure.invalidJSON
++        }
++        let pair = LocalAPICorrectionPair(original: pairOriginal, replacement: pairReplacement)
++        guard matchesEdit(pair, original: original, edited: edited) else {
++            throw LocalAPICorrectionFailure.mismatch
++        }
++        return pair
++    }
++
++    /// `left + original + right` and `left + replacement + right` must rebuild the two
++    /// passages, and that span must cover the character diff. A Latin fragment and a
++    /// single Han character taken from a longer name do not.
++    private static func matchesEdit(_ pair: LocalAPICorrectionPair, original: String, edited: String) -> Bool {
++        let old = Array(original)
++        let new = Array(edited)
++        let removed = Array(pair.original)
++        let added = Array(pair.replacement)
++        guard !removed.isEmpty, !added.isEmpty,
++              !removed.contains(where: \.isWhitespace), !added.contains(where: \.isWhitespace) else { return false }
++
++        var prefix = 0
++        while prefix < min(old.count, new.count), old[prefix] == new[prefix] { prefix += 1 }
++        var suffix = 0
++        while suffix < min(old.count - prefix, new.count - prefix),
++              old[old.count - 1 - suffix] == new[new.count - 1 - suffix] { suffix += 1 }
++        let oldEnd = old.count - suffix
++        let newEnd = new.count - suffix
++
++        guard removed.count <= old.count else { return false }
++        for start in 0...(old.count - removed.count) where Array(old[start..<(start + removed.count)]) == removed {
++            let left = Array(old[..<start])
++            let right = Array(old[(start + removed.count)...])
++            guard left + added + right == new else { continue }
++            let addedEnd = start + added.count
++            guard start <= prefix, start + removed.count >= oldEnd, addedEnd >= newEnd else { continue }
++            let before = start > 0 ? old[start - 1] : nil
++            let after = start + removed.count < old.count ? old[start + removed.count] : nil
++            guard !joinsLatinWord(before, removed.first), !joinsLatinWord(removed.last, after),
++                  !joinsLatinWord(before, added.first), !joinsLatinWord(added.last, after),
++                  !isSingleHanFragment(removed, before: before, after: after),
++                  !isSingleHanFragment(added, before: before, after: after) else { continue }
++            return true
++        }
++        return false
++    }
++
++    private static func joinsLatinWord(_ outside: Character?, _ inside: Character?) -> Bool {
++        guard let outside, let inside else { return false }
++        return continuesLatinWord(outside) && continuesLatinWord(inside)
++    }
++
++    private static func touchesLetter(_ characters: [Character], start: Int, end: Int) -> Bool {
++        if start > 0, characters[start - 1].isLetter { return true }
++        if end < characters.count, characters[end].isLetter { return true }
++        return false
++    }
++
++    private static func continuesLatinWord(_ character: Character) -> Bool {
++        if character == "'" || character == "’" || character == "-" { return true }
++        return (character.isLetter || character.isNumber) && !isHan(character)
++    }
++
++    /// One Han character beside another Han character is a fragment, not the name.
++    private static func isSingleHanFragment(_ term: [Character], before: Character?, after: Character?) -> Bool {
++        guard term.count == 1, let only = term.first, isHan(only) else { return false }
++        return (before.map(isHan) ?? false) || (after.map(isHan) ?? false)
++    }
++
++    private static func isHan(_ character: Character) -> Bool {
++        !character.unicodeScalars.isEmpty && character.unicodeScalars.allSatisfy { scalar in
++            switch scalar.value {
++            case 0x3400...0x9FFF, 0xF900...0xFAFF: true
++            default: false
++            }
++        }
++    }
++}
++
++nonisolated struct LocalAPICorrectionResponse: Encodable {
++    var correction: LocalAPICorrectionPair?
++
++    private enum CodingKeys: String, CodingKey { case correction }
++
++    func encode(to encoder: Encoder) throws {
++        var container = encoder.container(keyedBy: CodingKeys.self)
++        if let correction {
++            try container.encode(correction, forKey: .correction)
++        } else {
++            try container.encodeNil(forKey: .correction)
++        }
++    }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+index 489768d3dcec2a06d9db3dd78b48e1f6881c22da..fff7e8743e9fa0aa4fd8290be99ee236a680f50e 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+@@ -52,6 +52,9 @@ final class LocalAPIDictationPipeline {
+     /// Raw transcript → mode-specific result (cleanup, translate, edit, write), using the
+     /// same selected text model through a strict path that never returns raw speech.
+     var composeHandler: ((String, LocalAPIComposeOptions) async throws -> String)?
++    /// Original passage + correction instruction → the selected text model's raw output.
++    /// Corrections do not transcribe audio and do not write history.
++    var correctHandler: ((LocalAPICorrectionRequest, String) async throws -> String)?
+ 
+     private var isRunning = false
+ 
+@@ -224,6 +227,57 @@ final class LocalAPIDictationPipeline {
+         )
+     }
+ 
++    /// Handles POST /v1/corrections. Shares the busy and in-flight guard with dictation
++    /// and compose, then returns one validated word pair or null. Nothing is recorded.
++    func runCorrection(_ request: LocalAPICorrectionRequest) async -> LocalAPIHTTPResponse {
++        if let reason = busyReason() {
++            return .error(status: 503, reason)
++        }
++        guard !isRunning else {
++            return .error(status: 503, "Voxt is still working on the previous dictation.")
++        }
++        isRunning = true
++        defer { isRunning = false }
++
++        if LocalAPICorrection.isIgnorable(original: request.original, edited: request.edited) {
++            return .json(status: 200, LocalAPICorrectionResponse(correction: nil))
++        }
++        guard let correctHandler else {
++            return .error(status: 503, "No text model is available for this operation.")
++        }
++        let instruction = LocalAPICorrectionPrompt.instruction(original: request.original, edited: request.edited)
++        let output: String
++        do {
++            output = try await correctHandler(request, instruction)
++                .trimmingCharacters(in: .whitespacesAndNewlines)
++        } catch {
++            VoxtLog.warning("Local API correction failed: \(error.localizedDescription)")
++            return .error(status: 503, error.localizedDescription)
++        }
++        guard !output.isEmpty else {
++            return .error(status: 503, "The text model returned nothing.")
++        }
++        do {
++            let pair = try LocalAPICorrection.interpret(
++                modelOutput: output,
++                original: request.original,
++                edited: request.edited
++            )
++            return .json(status: 200, LocalAPICorrectionResponse(correction: pair))
++        } catch let failure as LocalAPICorrectionFailure {
++            let message: String
++            switch failure {
++            case .invalidJSON:
++                message = "The text model did not return valid correction JSON."
++            case .mismatch:
++                message = "The text model returned a correction that does not match the edit."
++            }
++            return .error(status: 503, message)
++        } catch {
++            return .error(status: 503, error.localizedDescription)
++        }
++    }
++
+     private func finish(
+         mode: LocalAPIComposeMode,
+         rawText: String,
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
+index d308ba70cec87ee054223d41dda73dc5c6bd1a89..450b0c0be3153e35e733dd079ae1d3365209ee61 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
+@@ -85,6 +85,9 @@ nonisolated enum LocalAPIRequestHandler {
+         dictate: @escaping @MainActor @Sendable (LocalAPIDictationRequest) async -> LocalAPIHTTPResponse,
+         compose: @escaping @MainActor @Sendable (LocalAPIComposeRequest) async -> LocalAPIHTTPResponse = { _ in
+             .error(status: 503, "No text model is available for this operation.")
++        },
++        correct: @escaping @MainActor @Sendable (LocalAPICorrectionRequest) async -> LocalAPIHTTPResponse = { _ in
++            .error(status: 503, "No text model is available for this operation.")
+         }
+     ) -> LocalAPIServer.Handler {
+         { request in
+@@ -93,7 +96,7 @@ nonisolated enum LocalAPIRequestHandler {
+             // reach a cloud model, so the request is refused before anything runs.
+             if request.header("x-voxt-model-policy") == "local-only" {
+                 switch route {
+-                case .dictation, .compose:
++                case .dictation, .compose, .correction:
+                     let locations = await modelLocations()
+                     guard locations.transcription == .local, locations.text == .local else {
+                         let cloud = locations.transcription == .remote || locations.text == .remote
+@@ -117,6 +120,7 @@ nonisolated enum LocalAPIRequestHandler {
+                         "dictations",
+                         "compose",
+                         "compose/prompts",
++                        "corrections",
+                     ],
+                     audio: .init(
+                         contentTypes: LocalAPIRouter.audioExtensions.keys.sorted(),
+@@ -133,6 +137,8 @@ nonisolated enum LocalAPIRequestHandler {
+                 return await dictate(dictation)
+             case let .compose(composeRequest):
+                 return await compose(composeRequest)
++            case let .correction(correction):
++                return await correct(correction)
+             }
+         }
+     }
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
+index 35cd0f986e6a7663f81b2ebd8cc06d5ec867ff4d..c90ad4d3018789dc0f56fdca17ff3396adda67b5 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
+@@ -32,6 +32,7 @@ nonisolated enum LocalAPIRoute: Equatable, Sendable {
+     case composePrompts
+     case dictation(LocalAPIDictationRequest)
+     case compose(LocalAPIComposeRequest)
++    case correction(LocalAPICorrectionRequest)
+     case reject(LocalAPIHTTPResponse)
+ }
+ 
+@@ -119,6 +120,36 @@ nonisolated struct LocalAPIRouter: Sendable {
+                 options: body.options,
+                 language: language
+             ))
++        case "/v1/corrections":
++            guard request.method == "POST" else { return .reject(.error(status: 405, "Use POST.")) }
++            let mediaType = request.header("content-type")?
++                .split(separator: ";").first?
++                .trimmingCharacters(in: .whitespaces).lowercased() ?? ""
++            guard mediaType == "application/json" else {
++                return .reject(.error(status: 415, "Send application/json."))
++            }
++            let object: Any
++            do {
++                object = try JSONSerialization.jsonObject(with: request.body)
++            } catch {
++                return .reject(.error(status: 400, "The corrections request is not valid JSON."))
++            }
++            guard let fields = object as? [String: Any] else {
++                return .reject(.error(status: 400, "The corrections request is not valid JSON."))
++            }
++            guard let original = fields["original"] as? String, let edited = fields["edited"] as? String else {
++                return .reject(.error(status: 400, "original and edited must be strings."))
++            }
++            guard !original.isEmpty, !edited.isEmpty else {
++                return .reject(.error(status: 400, "The original and edited text must not be empty."))
++            }
++            guard original.count <= 2_000, edited.count <= 2_000 else {
++                return .reject(.error(status: 400, "Use at most 2000 characters for each passage."))
++            }
++            guard original != edited else {
++                return .reject(.error(status: 400, "The original and edited text are the same."))
++            }
++            return .correction(LocalAPICorrectionRequest(original: original, edited: edited))
+         default:
+             return .reject(.error(status: 404, "Unknown path."))
+         }
+diff --git a/Voxt/VoxtTests/LocalAPIContractTests.swift b/Voxt/VoxtTests/LocalAPIContractTests.swift
+index a9abb8177a1a92aa59744de9e21b25e9f183257c..c0b677c27a3e10e6fb7bf3a07b32702e90ac778e 100644
+--- a/Voxt/VoxtTests/LocalAPIContractTests.swift
++++ b/Voxt/VoxtTests/LocalAPIContractTests.swift
+@@ -35,6 +35,7 @@ final class LocalAPIContractTests: XCTestCase {
+             transcribe: { _, _ in transcript }, enhance: { _ in "Tomorrow at three, we meet in room four." },
+             finalize: { LocalAPIFinalText(text: $0) }, record: { _ in })
+         pipeline.composeHandler = composed
++        pipeline.correctHandler = { _, _ in #"{"correction":{"original":"Nova","replacement":"Novo"}}"# }
+         return pipeline
+     }
+ 
+@@ -47,7 +48,8 @@ final class LocalAPIContractTests: XCTestCase {
+             modelStatus: { LocalAPIModelStatus(transcription: .ready, text: .ready) },
+             modelLocations: { locations },
+             dictate: { await pipeline.run($0) },
+-            compose: { await pipeline.runCompose($0) })
++            compose: { await pipeline.runCompose($0) },
++            correct: { await pipeline.runCorrection($0) })
+     }
+ 
+     private func request(_ method: String, _ path: String, contentType: String? = nil, body: Data = Data(),
+@@ -163,4 +165,11 @@ final class LocalAPIContractTests: XCTestCase {
+         }
+         try check(errors, against: "errors.json")
+     }
++
++    func testCorrection() async throws {
++        let body = try Data(contentsOf: Self.contract.appendingPathComponent("correction-request.json"))
++        let response = await handler()(request("POST", "/v1/corrections", contentType: "application/json", body: body))
++        XCTAssertEqual(response.status, 200)
++        try check(response, against: "correction-response.json")
++    }
+ }
+diff --git a/Voxt/VoxtTests/LocalAPICorrectionTests.swift b/Voxt/VoxtTests/LocalAPICorrectionTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd2fc707cc143ad8a51218e444ac7c14cf6ff848
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPICorrectionTests.swift
+@@ -0,0 +1,139 @@
++// LocalAPICorrectionTests.swift
++// Prompt, strict parser, and passage checks for POST /v1/corrections.
++
++import XCTest
++@testable import Voxt
++
++final class LocalAPICorrectionTests: XCTestCase {
++    func testPromptAsksForOneFullWordAndIncludesThePassages() {
++        let prompt = LocalAPICorrectionPrompt.instruction(original: "请用星浪处理。", edited: "请用星朗处理。")
++        XCTAssertTrue(prompt.contains("请用星浪处理。"))
++        XCTAssertTrue(prompt.contains("请用星朗处理。"))
++        XCTAssertTrue(prompt.contains("full"))
++        XCTAssertTrue(prompt.contains("{\"correction\":null}"))
++        XCTAssertTrue(prompt.lowercased().contains("append"))
++        XCTAssertTrue(prompt.lowercased().contains("delet"))
++        XCTAssertTrue(prompt.lowercased().contains("number"))
++        XCTAssertTrue(prompt.lowercased().contains("punctuation"))
++        XCTAssertTrue(prompt.lowercased().contains("rewrite"))
++        XCTAssertTrue(prompt.contains("only"))
++    }
++
++    func testPromptDoesNotFewShotTheLiveChinesePair() {
++        let prompt = LocalAPICorrectionPrompt.instruction(original: "Use Voice today.", edited: "Use Voxt today.")
++        XCTAssertFalse(prompt.contains("星浪"))
++        XCTAssertFalse(prompt.contains("星朗"))
++        XCTAssertTrue(prompt.contains("Use Voice today."))
++        XCTAssertTrue(prompt.contains("Use Voxt today."))
++    }
++
++    func testParserAcceptsTheFullChineseName() throws {
++        let parsed = try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"星浪","replacement":"星朗"}}"#,
++            original: "请用星浪处理。",
++            edited: "请用星朗处理。"
++        )
++        XCTAssertEqual(parsed, LocalAPICorrectionPair(original: "星浪", replacement: "星朗"))
++    }
++
++    func testParserAcceptsAnAlphanumericModelNameAndRejectsItsDigit() throws {
++        let parsed = try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"Qwen2","replacement":"Qwen3"}}"#,
++            original: "Use Qwen2 today.",
++            edited: "Use Qwen3 today."
++        )
++        XCTAssertEqual(parsed, LocalAPICorrectionPair(original: "Qwen2", replacement: "Qwen3"))
++        XCTAssertThrowsError(try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"2","replacement":"3"}}"#,
++            original: "Use Qwen2 today.",
++            edited: "Use Qwen3 today."
++        ))
++    }
++
++    func testParserAcceptsAFullLatinWord() throws {
++        let parsed = try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"Voice","replacement":"Voxt"}}"#,
++            original: "Use Voice today.",
++            edited: "Use Voxt today."
++        )
++        XCTAssertEqual(parsed, LocalAPICorrectionPair(original: "Voice", replacement: "Voxt"))
++    }
++
++    func testParserReturnsNilWhenTheModelReportsNoCorrection() throws {
++        let parsed = try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":null}"#,
++            original: "Use Voice today.",
++            edited: "Use Voxt today."
++        )
++        XCTAssertNil(parsed)
++    }
++
++    func testParserRejectsInvalidModelJSON() {
++        XCTAssertThrowsError(try LocalAPICorrection.interpret(
++            modelOutput: "星浪 -> 星朗",
++            original: "请用星浪处理。",
++            edited: "请用星朗处理。"
++        ))
++        XCTAssertThrowsError(try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"星浪"}}"#,
++            original: "请用星浪处理。",
++            edited: "请用星朗处理。"
++        ))
++        XCTAssertThrowsError(try LocalAPICorrection.interpret(
++            modelOutput: #"{"original":"星浪","replacement":"星朗"}"#,
++            original: "请用星浪处理。",
++            edited: "请用星朗处理。"
++        ))
++    }
++
++    func testParserRejectsASingleHanFragmentAndAHallucinatedTerm() {
++        XCTAssertThrowsError(try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"浪","replacement":"朗"}}"#,
++            original: "请用星浪处理。",
++            edited: "请用星朗处理。"
++        ))
++        XCTAssertThrowsError(try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"ice","replacement":"oxt"}}"#,
++            original: "Use Voice today.",
++            edited: "Use Voxt today."
++        ))
++        XCTAssertThrowsError(try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"Keyboard","replacement":"Voxt"}}"#,
++            original: "Use Voice today.",
++            edited: "Use Voxt today."
++        ))
++    }
++
++    func testIgnorableEditsAreNotWordCorrections() {
++        XCTAssertTrue(LocalAPICorrection.isIgnorable(original: "Use Voxt.", edited: "Use Voxt. Thanks!"))
++        XCTAssertTrue(LocalAPICorrection.isIgnorable(original: "Use Voxt today.", edited: "Use today."))
++        XCTAssertTrue(LocalAPICorrection.isIgnorable(original: "Use Voxt.", edited: "Use Voxt!"))
++        XCTAssertTrue(LocalAPICorrection.isIgnorable(original: "Pay $50.", edited: "Pay $60."))
++        XCTAssertTrue(LocalAPICorrection.isIgnorable(original: "Use 50 today.", edited: "Use 60 today."))
++        XCTAssertFalse(LocalAPICorrection.isIgnorable(original: "Use Qwen2 today.", edited: "Use Qwen3 today."))
++        XCTAssertTrue(LocalAPICorrection.isIgnorable(
++            original: "See Alice about the invoice",
++            edited: "See Bob about the bill"
++        ))
++        XCTAssertFalse(LocalAPICorrection.isIgnorable(original: "请用星浪处理。", edited: "请用星朗处理。"))
++        XCTAssertFalse(LocalAPICorrection.isIgnorable(original: "Use Voice today.", edited: "Use Voxt today."))
++        XCTAssertFalse(LocalAPICorrection.isIgnorable(original: "Use oxt.", edited: "Use Voxt."))
++        XCTAssertFalse(LocalAPICorrection.isIgnorable(original: "Use Vooxt.", edited: "Use Voxt."))
++        XCTAssertFalse(LocalAPICorrection.isIgnorable(original: "oxt today.", edited: "Voxt today."))
++    }
++
++    func testParserAcceptsALetterInsertedOrDeletedInsideAWord() throws {
++        let inserted = try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"oxt","replacement":"Voxt"}}"#,
++            original: "Use oxt.",
++            edited: "Use Voxt."
++        )
++        XCTAssertEqual(inserted, LocalAPICorrectionPair(original: "oxt", replacement: "Voxt"))
++        let deleted = try LocalAPICorrection.interpret(
++            modelOutput: #"{"correction":{"original":"Vooxt","replacement":"Voxt"}}"#,
++            original: "Use Vooxt.",
++            edited: "Use Voxt."
++        )
++        XCTAssertEqual(deleted, LocalAPICorrectionPair(original: "Vooxt", replacement: "Voxt"))
++    }
++}
+diff --git a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+index 65bd61a27bdb07b94e8ee433a4b98bf428801345..ebf0aac7c41c43adf7a5eec088bbe96d118ed41e 100644
+--- a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
++++ b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+@@ -404,4 +404,117 @@ final class LocalAPIDictationPipelineTests: XCTestCase {
+         XCTAssertEqual(response.status, 503)
+         XCTAssertTrue(transcribedFiles.isEmpty)
+     }
++
++    // MARK: Corrections
++
++    private func correctionRequest(original: String, edited: String) -> LocalAPICorrectionRequest {
++        LocalAPICorrectionRequest(original: original, edited: edited)
++    }
++
++    func testCorrectionReturnsTheValidatedPairAndWritesNoHistory() async throws {
++        var prompts: [String] = []
++        let pipeline = makePipeline()
++        pipeline.correctHandler = { _, instruction in
++            prompts.append(instruction)
++            return #"{"correction":{"original":"星浪","replacement":"星朗"}}"#
++        }
++
++        let response = await pipeline.runCorrection(correctionRequest(original: "请用星浪处理。", edited: "请用星朗处理。"))
++
++        XCTAssertEqual(response.status, 200)
++        let body = try json(response)
++        let correction = try XCTUnwrap(body["correction"] as? [String: String])
++        XCTAssertEqual(correction["original"], "星浪")
++        XCTAssertEqual(correction["replacement"], "星朗")
++        XCTAssertEqual(prompts.count, 1)
++        XCTAssertTrue(prompts[0].contains("请用星浪处理。"))
++        XCTAssertTrue(prompts[0].contains("星朗"))
++        XCTAssertTrue(recorded.isEmpty)
++        XCTAssertTrue(transcribedFiles.isEmpty)
++        XCTAssertTrue(enhancedInputs.isEmpty)
++    }
++
++    func testIgnorableCorrectionSkipsTheModelAndReturnsNull() async throws {
++        let pipeline = makePipeline()
++        pipeline.correctHandler = { _, _ in
++            XCTFail("an append, deletion, number, punctuation, or rewrite must not call the model")
++            return #"{"correction":{"original":"Voxt","replacement":"Voice"}}"#
++        }
++        let samples = [
++            ("Use Voxt.", "Use Voxt. Thanks!"),
++            ("Use Voxt today.", "Use today."),
++            ("Use Voxt.", "Use Voxt!"),
++            ("Pay $50.", "Pay $60."),
++            ("Use 50 today.", "Use 60 today."),
++            ("See Alice about the invoice", "See Bob about the bill"),
++        ]
++        for sample in samples {
++            let response = await pipeline.runCorrection(correctionRequest(original: sample.0, edited: sample.1))
++            XCTAssertEqual(response.status, 200, sample.0)
++            XCTAssertTrue(try json(response)["correction"] is NSNull, sample.0)
++        }
++        XCTAssertTrue(recorded.isEmpty)
++    }
++
++    func testLetterInsertAndDeleteInsideAWordCallTheModel() async throws {
++        let pipeline = makePipeline()
++        pipeline.correctHandler = { request, _ in
++            if request.original == "Use oxt." {
++                return #"{"correction":{"original":"oxt","replacement":"Voxt"}}"#
++            }
++            return #"{"correction":{"original":"Vooxt","replacement":"Voxt"}}"#
++        }
++        let inserted = await pipeline.runCorrection(correctionRequest(original: "Use oxt.", edited: "Use Voxt."))
++        let deleted = await pipeline.runCorrection(correctionRequest(original: "Use Vooxt.", edited: "Use Voxt."))
++        XCTAssertEqual(inserted.status, 200)
++        XCTAssertEqual(deleted.status, 200)
++        let insertedPair = try XCTUnwrap(try json(inserted)["correction"] as? [String: String])
++        let deletedPair = try XCTUnwrap(try json(deleted)["correction"] as? [String: String])
++        XCTAssertEqual(insertedPair["original"], "oxt")
++        XCTAssertEqual(insertedPair["replacement"], "Voxt")
++        XCTAssertEqual(deletedPair["original"], "Vooxt")
++        XCTAssertEqual(deletedPair["replacement"], "Voxt")
++        XCTAssertTrue(recorded.isEmpty)
++        XCTAssertTrue(transcribedFiles.isEmpty)
++    }
++
++    func testModelNullAndInvalidOutput() async throws {
++        let pipeline = makePipeline()
++        pipeline.correctHandler = { _, _ in #"{"correction":null}"# }
++        let absent = await pipeline.runCorrection(correctionRequest(original: "Use Voice today.", edited: "Use Voxt today."))
++        XCTAssertEqual(absent.status, 200)
++        XCTAssertTrue(try json(absent)["correction"] is NSNull)
++
++        pipeline.correctHandler = { _, _ in "not json" }
++        let invalid = await pipeline.runCorrection(correctionRequest(original: "Use Voice today.", edited: "Use Voxt today."))
++        XCTAssertEqual(invalid.status, 503)
++        XCTAssertFalse((try json(invalid)["error"] as? String ?? "").isEmpty)
++
++        pipeline.correctHandler = { _, _ in #"{"correction":{"original":"浪","replacement":"朗"}}"# }
++        let fragment = await pipeline.runCorrection(correctionRequest(original: "请用星浪处理。", edited: "请用星朗处理。"))
++        XCTAssertEqual(fragment.status, 503)
++        XCTAssertTrue(recorded.isEmpty)
++        XCTAssertTrue(transcribedFiles.isEmpty)
++    }
++
++    func testCorrectionSharesTheBusyGuard() async throws {
++        let busy = makePipeline(busyReason: "Voxt is recording on the Mac.")
++        busy.correctHandler = { _, _ in #"{"correction":null}"# }
++        let blocked = await busy.runCorrection(correctionRequest(original: "Use Voice today.", edited: "Use Voxt today."))
++        XCTAssertEqual(blocked.status, 503)
++        XCTAssertEqual(try json(blocked)["error"] as? String, "Voxt is recording on the Mac.")
++
++        let pipeline = makePipeline()
++        pipeline.correctHandler = { _, _ in
++            try await Task.sleep(for: .milliseconds(200))
++            return #"{"correction":{"original":"星浪","replacement":"星朗"}}"#
++        }
++        async let first = pipeline.runCorrection(correctionRequest(original: "请用星浪处理。", edited: "请用星朗处理。"))
++        try await Task.sleep(for: .milliseconds(40))
++        let second = await pipeline.runCompose(makeComposeRequest())
++        let firstResponse = await first
++        XCTAssertEqual(second.status, 503)
++        XCTAssertEqual(firstResponse.status, 200)
++        XCTAssertTrue(recorded.isEmpty)
++    }
+ }
+diff --git a/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift b/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
+index 6216aefed1748147ffea317f7740029c22aa78d3..c91e84749883de3c589894f4d7c10c98cbf95990 100644
+--- a/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
++++ b/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
+@@ -90,6 +90,7 @@ final class LocalAPIRequestHandlerTests: XCTestCase {
+             "dictations",
+             "compose",
+             "compose/prompts",
++            "corrections",
+         ])
+         let audio = try XCTUnwrap(body["audio"] as? [String: Any])
+         XCTAssertEqual(audio["maxBodyBytes"] as? Int, 4_096)
+diff --git a/Voxt/VoxtTests/LocalAPIRouterTests.swift b/Voxt/VoxtTests/LocalAPIRouterTests.swift
+index 27450553a05ac377dcaad4e7e17bdc1f2d713446..5c6afc5efead6e61da6ba0482bac1362fabd979c 100644
+--- a/Voxt/VoxtTests/LocalAPIRouterTests.swift
++++ b/Voxt/VoxtTests/LocalAPIRouterTests.swift
+@@ -274,4 +274,51 @@ final class LocalAPIRouterTests: XCTestCase {
+         XCTAssertEqual(chinese.language, .request("Chinese"))
+         XCTAssertEqual(status(try language("en\"; x")), 400)
+     }
++
++    // MARK: Corrections
++
++    private func correctionRequest(
++        original: Any = "请用星浪处理。",
++        edited: Any = "请用星朗处理。",
++        method: String = "POST",
++        contentType: String? = "application/json",
++        raw: Data? = nil
++    ) -> LocalAPIHTTPRequest {
++        let body = raw ?? (try! JSONSerialization.data(withJSONObject: ["original": original, "edited": edited]))
++        return request(method, "/v1/corrections", contentType: contentType, body: body)
++    }
++
++    func testCorrectionRoutesAValidPair() throws {
++        guard case let .correction(correction) = router.route(correctionRequest()) else {
++            return XCTFail("expected .correction")
++        }
++        XCTAssertEqual(correction.original, "请用星浪处理。")
++        XCTAssertEqual(correction.edited, "请用星朗处理。")
++    }
++
++    func testCorrectionAcceptsExactly2000Characters() {
++        let original = String(repeating: "字", count: 2_000)
++        let edited = String(repeating: "文", count: 2_000)
++        guard case .correction = router.route(correctionRequest(original: original, edited: edited)) else {
++            return XCTFail("2000 characters must pass")
++        }
++    }
++
++    func testCorrectionRejectsMethodContentTypeAndJSON() {
++        XCTAssertEqual(status(router.route(correctionRequest(method: "GET"))), 405)
++        XCTAssertEqual(status(router.route(request("POST", "/v1/corrections", token: nil, contentType: "application/json", body: Data("{}".utf8)))), 401)
++        XCTAssertEqual(status(router.route(correctionRequest(contentType: "text/plain"))), 415)
++        XCTAssertEqual(status(router.route(correctionRequest(contentType: nil))), 415)
++        XCTAssertEqual(status(router.route(correctionRequest(raw: Data("not json".utf8)))), 400)
++        XCTAssertEqual(status(router.route(correctionRequest(raw: Data("[]".utf8)))), 400)
++    }
++
++    func testCorrectionRejectsWrongTypesIdenticalAndOversize() {
++        XCTAssertEqual(status(router.route(correctionRequest(original: 3, edited: "星朗"))), 400)
++        XCTAssertEqual(status(router.route(correctionRequest(original: "星浪", edited: ["星朗"]))), 400)
++        XCTAssertEqual(status(router.route(correctionRequest(original: "", edited: "星朗"))), 400)
++        XCTAssertEqual(status(router.route(correctionRequest(original: "星浪", edited: "星浪"))), 400)
++        XCTAssertEqual(status(router.route(correctionRequest(original: String(repeating: "字", count: 2_001), edited: "星朗"))), 400)
++        XCTAssertEqual(status(router.route(correctionRequest(original: "星浪", edited: String(repeating: "字", count: 2_001)))), 400)
++    }
+ }
+diff --git a/Voxt/docs/LocalAPI.md b/Voxt/docs/LocalAPI.md
+index c6cfa09c887d47e8c36283370857f351406f0a9c..571c54cd7ab2cbc68645d41a9571053073d922ca 100644
+--- a/Voxt/docs/LocalAPI.md
++++ b/Voxt/docs/LocalAPI.md
+@@ -38,6 +38,7 @@ In the App Sandbox (the release build), macOS lets Voxt inspect another process'
+ | `POST /v1/dictations` | Body: audio bytes. `Content-Type`: `audio/wav`, `audio/x-m4a`, `audio/mp4`, `audio/aac`, `audio/mpeg` or `audio/x-caf`. Add `?enhance=0` to skip the text model, and `?language=auto` (detect) or `?language=English` (a language name) to override your language settings for this recording. Returns `id`, `text`, `rawText`, `enhanced`, `asrMs`, `enhanceMs` |
+ 
+ | `POST /v1/compose` | JSON body: `audio` (base64), `contentType` (one of the audio types above), optional `language` (as for dictations) and `options`. Runs the selected text model with an instruction for `options.mode`. Returns the dictation fields plus `mode`, and `status: "not_applied"` with the unchanged selection when an edit could not be applied |
++| `POST /v1/corrections` | JSON body `{"original": "…", "edited": "…"}`, each 1 to 2,000 characters and different. When the user fixed one misheard word or name in a dictated passage, returns `{"correction": {"original": "…", "replacement": "…"}}` (a pair that is in both passages), otherwise `{"correction": null}`. Uses the selected text model; nothing is stored, and the caller decides whether to add the pair to its dictionary |
+ | `GET /v1/compose/prompts` | `{"prompts": {"dictate": "…", "translate": "…", "edit": "…", "write": "…"}}`: the built-in instruction of each mode |
+ 
+ `options` of a compose request:

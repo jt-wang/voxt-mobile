@@ -424,9 +424,12 @@ class BuildTests(Fixture):
     """release-build.sh builds in the clean checkout and stamps the commit; checked with --dry-run."""
 
     def build(self, *args, env=None):
+        signing = self.tmp / "Signing.local.xcconfig"
+        signing.write_text("DEVELOPMENT_TEAM = ABCDE12345\nVOXT_MOBILE_ID_PREFIX = com.example.official\n"
+                           "VOXT_KEYCHAIN_SERVICE_PREFIX = com.example.legacy\n")
         full = {**os.environ, "VOXT_RELEASE_TAGGER": "Release Bot <release@example.com>",
                 "VOXT_TEAM_ID": "ABCDE12345", "VOXT_PROFILE_APP": "App Profile",
-                "VOXT_PROFILE_KEYBOARD": "Keyboard Profile", **(env or {})}
+                "VOXT_PROFILE_KEYBOARD": "Keyboard Profile", "VOXT_SIGNING_LOCAL": str(signing), **(env or {})}
         return subprocess.run(["bash", str(BUILD), *map(str, args)], capture_output=True, text=True, timeout=120, env=full)
 
     def test_dry_run_builds_in_the_checkout_with_the_revision_and_path_maps(self):
@@ -458,6 +461,23 @@ class BuildTests(Fixture):
                             "--dry-run", env={"VOXT_TEAM_ID": ""})
         self.assertBlocked(result, "VOXT_TEAM_ID")
 
+    def test_ios_signs_with_the_private_signing_settings(self):
+        # The public checkout has only neutral IDs; the official IDs and Keychain names stay private.
+        out = self.tmp / "out"
+        result = self.build(*self.remote_args(), "--tag", "v1.0.0", "--build", "7", "--out", out, "--dry-run")
+        self.assertPassed(result)
+        archive = next(line for line in result.stdout.splitlines() if "xcodebuild archive" in line)
+        self.assertIn(f"-xcconfig {self.tmp / 'Signing.local.xcconfig'}", archive)
+        profiles = plistlib.loads((out / "ExportOptions.plist").read_bytes())["provisioningProfiles"]
+        self.assertEqual(profiles, {"com.example.official": "App Profile", "com.example.official.keyboard": "Keyboard Profile"})
+        self.assertFalse((out / "source/ios/Config/Signing.local.xcconfig").exists(), "the public checkout stays as published")
+
+    def test_ios_refuses_without_the_private_signing_settings(self):
+        for value in ("", str(self.tmp / "missing.xcconfig")):
+            result = self.build(*self.remote_args(), "--tag", "v1.0.0", "--build", "7", "--out", self.tmp / "out",
+                                "--dry-run", env={"VOXT_SIGNING_LOCAL": value})
+            self.assertBlocked(result, "VOXT_SIGNING_LOCAL")
+
     def test_refuses_without_a_release_tagger(self):
         result = self.build(*self.remote_args(), "--tag", "v1.0.0", "--build", "7", "--out", self.tmp / "out",
                             "--dry-run", env={"VOXT_RELEASE_TAGGER": ""})
@@ -480,11 +500,65 @@ class BuildTests(Fixture):
                 self.assertIn("--strip-debug", line, "every Mac app is stripped of build paths before signing")
         self.assertIn("--identity Developer ID Application: Example (ABCDE12345) --team ABCDE12345", sign)
         # Voxt's ConnectorLinkServer only trusts a Connector with Voxt's team and this identifier.
-        self.assertIn('certificate leaf[subject.OU] = "ABCDE12345" and identifier "com.voxtmobile.connector"', sign)
+        self.assertIn('certificate leaf[subject.OU] = "ABCDE12345" and identifier "com.voxt.VoxtConnector"', sign)
         steps = ["release-mac.py sign", "release-mac.py dmg", "release-mac.py notarize", "release-gate.py check", "release-gate.py release"]
         self.assertEqual([s for s in steps if s in text], steps)
         self.assertEqual(sorted(steps, key=text.index), steps, "notarized and stapled before the check and the tag")
         self.assertNotIn("/keys/AuthKey_TEST.p8", text.split("release-mac.py notarize")[0], "the key path only goes to notarize")
+
+    def mac_build(self, *extra, env=None):
+        return self.build(*self.local_args(), "--rev", self.released, "--version", "v2.0.0", "--mac", *extra,
+                          "--out", self.tmp / "out", "--dry-run", env={**self.MAC_ENV, **(env or {})})
+
+    @staticmethod
+    def connector_lines(text):
+        build = next(line for line in text.splitlines() if "build-connector.py" in line)
+        sign = next(line for line in text.splitlines() if "release-mac.py sign" in line)
+        return build, sign
+
+    def test_mac_connector_gets_the_neutral_id_without_the_private_setting(self):
+        shared = (ROOT / "mac/VoxtConnector/Config/Signing.shared.xcconfig").read_text()
+        neutral = next(l.split("=", 1)[1].strip() for l in shared.splitlines() if l.startswith("VOXT_CONNECTOR_BUNDLE_ID"))
+        result = self.mac_build(env={"VOXT_CONNECTOR_SIGNING_LOCAL": ""})
+        self.assertPassed(result)
+        build, sign = self.connector_lines(result.stdout)
+        self.assertIn(f"--bundle-id {neutral}", build)
+        self.assertIn(f'and identifier "{neutral}"', sign)
+
+    def test_mac_connector_keeps_the_official_id_from_the_private_setting(self):
+        # Installed Connectors and the Voxt Omni Dev that trusts them keep their ID across releases.
+        private = self.tmp / "Connector.local.xcconfig"
+        private.write_text("// official build\nVOXT_CONNECTOR_BUNDLE_ID = com.example.official.connector\n")
+        result = self.mac_build(env={"VOXT_CONNECTOR_SIGNING_LOCAL": str(private)})
+        self.assertPassed(result)
+        build, sign = self.connector_lines(result.stdout)
+        self.assertIn("--bundle-id com.example.official.connector", build)
+        self.assertIn('and identifier "com.example.official.connector"', sign)
+        self.assertFalse((self.tmp / "out/source/mac").exists(), "the public checkout stays as published")
+
+    def test_mac_refuses_a_broken_private_setting(self):
+        empty = self.tmp / "empty.xcconfig"
+        empty.write_text("DEVELOPMENT_TEAM = ABCDE12345\n")
+        for value in (str(self.tmp / "missing.xcconfig"), str(empty)):
+            self.assertBlocked(self.mac_build(env={"VOXT_CONNECTOR_SIGNING_LOCAL": value}), "VOXT_CONNECTOR_SIGNING_LOCAL")
+
+    def voxt_app(self, name, connector=None):
+        app = self.tmp / name / "Voxt Omni Dev.app"
+        (app / "Contents").mkdir(parents=True)
+        info = {"CFBundleIdentifier": "com.voxt.Voxt.omni.dev"}
+        if connector:
+            info["VoxtConnectorBundleIdentifier"] = connector
+        (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+        return app
+
+    def test_mac_refuses_a_voxt_that_trusts_another_connector(self):
+        private = self.tmp / "Connector.local.xcconfig"
+        private.write_text("VOXT_CONNECTOR_BUNDLE_ID = com.example.official.connector\n")
+        env = {"VOXT_CONNECTOR_SIGNING_LOCAL": str(private)}
+        self.assertPassed(self.mac_build("--mac-app", self.voxt_app("same", "com.example.official.connector"), env=env))
+        for app in (self.voxt_app("neutral"), self.voxt_app("other", "com.example.other")):
+            self.assertBlocked(self.mac_build("--mac-app", app, env=env), "VoxtConnectorBundleIdentifier")
+        self.assertPassed(self.mac_build("--mac-app", self.voxt_app("default"), env={"VOXT_CONNECTOR_SIGNING_LOCAL": ""}))
 
     def test_mac_refuses_without_developer_id_or_notary_settings(self):
         for name in ("VOXT_DEVELOPER_ID", "VOXT_NOTARY_KEY_ID"):

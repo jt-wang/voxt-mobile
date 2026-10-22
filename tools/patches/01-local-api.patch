@@ -1,0 +1,2079 @@
+diff --git a/Voxt/Voxt/App/EnhancementPromptFlow.swift b/Voxt/Voxt/App/EnhancementPromptFlow.swift
+index ceecda1051ba9e23f18a4df85952a446e2b01f4c..f9741a21f76a3085d15e28726bec599878d9b0ad 100644
+--- a/Voxt/Voxt/App/EnhancementPromptFlow.swift
++++ b/Voxt/Voxt/App/EnhancementPromptFlow.swift
+@@ -42,7 +42,8 @@ extension AppDelegate {
+ 
+     func resolvedEnhancementPrompt(
+         rawTranscription: String,
+-        glossarySelectionPolicy: DictionaryGlossarySelectionPolicy? = nil
++        glossarySelectionPolicy: DictionaryGlossarySelectionPolicy? = nil,
++        usesAppBranch: Bool = true
+     ) -> EnhancementPromptResolution {
+         let groups = loadAppBranchGroups()
+         let urlsByID = loadAppBranchURLsByID()
+@@ -66,7 +67,7 @@ extension AppDelegate {
+                 userMainLanguagePromptValue: userMainLanguagePromptValue,
+                 userOtherLanguagesPromptValue: userOtherMainLanguagesPromptValue,
+                 dictionaryGlossary: glossary,
+-                appEnhancementEnabled: appEnhancementEnabled,
++                appEnhancementEnabled: appEnhancementEnabled && usesAppBranch,
+                 groups: groups,
+                 urlsByID: urlsByID,
+                 frontmostBundleID: frontmostBundleID,
+diff --git a/Voxt/Voxt/App/LocalAPIFlow.swift b/Voxt/Voxt/App/LocalAPIFlow.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..beec7ed34fc884cece3e7bcc9e6e57bd98050c45
+--- /dev/null
++++ b/Voxt/Voxt/App/LocalAPIFlow.swift
+@@ -0,0 +1,190 @@
++// LocalAPIFlow.swift
++// Provides the Local API: audio sent by another app or device over loopback is run through the
++// user's selected ASR model, enhancement and dictionary. The result is returned to the caller and
++// saved to history; nothing is pasted on the Mac.
++
++import Foundation
++
++extension AppDelegate {
++    static let localAPISourceName = "Local API"
++
++    /// Starts or stops the server so it matches the stored settings.
++    func applyLocalAPIServerLifecycle() {
++        let shouldRun = LocalAPISettings.isEnabled()
++        let port = LocalAPISettings.port()
++        if !shouldRun || localAPIServerPort != port {
++            stopLocalAPIServer()
++            localAPIServerStatus = shouldRun ? .starting : .off
++        }
++        guard shouldRun, localAPIServer == nil else { return }
++        // A napping menu bar app answers tens of seconds late; stay awake while listening,
++        // but let the Mac itself sleep.
++        localAPIActivity = ProcessInfo.processInfo.beginActivity(
++            options: .userInitiatedAllowingIdleSystemSleep,
++            reason: "Voxt Local API is waiting for dictations"
++        )
++
++        let pipeline = LocalAPIDictationPipeline(
++            temporaryDirectory: FileManager.default.temporaryDirectory,
++            busyReason: { [weak self] in self?.localAPIBusyReason() },
++            transcribe: { [weak self] url in
++                guard let self else { throw CancellationError() }
++                return try await self.transcribeLocalAPIAudio(at: url)
++            },
++            enhance: { [weak self] text in
++                guard let self else { return text }
++                return try await self.enhanceLocalAPITranscript(text)
++            },
++            finalize: { [weak self] text in
++                self?.finalizeLocalAPIText(text) ?? LocalAPIFinalText(text: text)
++            },
++            record: { [weak self] outcome in
++                self?.recordLocalAPIHistory(outcome)
++            }
++        )
++        let router = LocalAPIRouter(token: LocalAPISettings.token(), maxBodyBytes: LocalAPISettings.maxBodyBytes)
++        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
++        let handler = LocalAPIRequestHandler.make(
++            router: router,
++            version: version,
++            modelStatus: { [weak self] in
++                self?.localAPIModelStatus() ?? LocalAPIModelStatus(transcription: .missing, text: .missing)
++            },
++            dictate: { dictation in
++                await pipeline.run(dictation)
++            }
++        )
++        let server = LocalAPIServer(port: UInt16(port), maxBodyBytes: LocalAPISettings.maxBodyBytes, handler: handler)
++        localAPIServer = server
++        localAPIServerPort = port
++        localAPIServerStatus = .starting
++        Task { @MainActor [weak self] in
++            do {
++                let bound = try await server.start()
++                VoxtLog.info("Local API server listening on 127.0.0.1:\(bound)")
++                guard let self, self.localAPIServer === server else { return }
++                self.localAPIServerStatus = .listening(port: Int(bound))
++            } catch {
++                VoxtLog.warning("Local API server failed to start: \(error.localizedDescription)")
++                guard let self, self.localAPIServer === server else { return }
++                self.localAPIServer = nil
++                self.localAPIServerPort = nil
++                self.localAPIServerStatus = .failed(error.localizedDescription)
++            }
++        }
++    }
++
++    func stopLocalAPIServer() {
++        localAPIServer?.stop()
++        localAPIServer = nil
++        localAPIServerPort = nil
++        if let localAPIActivity {
++            ProcessInfo.processInfo.endActivity(localAPIActivity)
++            self.localAPIActivity = nil
++        }
++    }
++
++    private func localAPIBusyReason() -> String? {
++        if isSessionActive {
++            return AppLocalization.localizedString("Voxt is recording on the Mac. Try again in a moment.")
++        }
++        if meetingSessionCoordinator.isActive {
++            return AppLocalization.localizedString("Voxt is recording a meeting on the Mac.")
++        }
++        return nil
++    }
++
++    private func enhanceLocalAPITranscript(_ text: String) async throws -> String {
++        switch enhancementMode {
++        case .off:
++            return text
++        case .customLLM:
++            guard let repo = resolvedTranscriptionEnhancementLocalRepo(),
++                  customLLMManager.canAttemptInference(repo: repo) else {
++                VoxtLog.asrWarning("Local API: custom LLM selected but not installed. Returning raw transcription.")
++                return text
++            }
++        case .appleIntelligence, .remoteLLM:
++            break
++        }
++        // The Mac's frontmost app says nothing about where the caller will use the text, so App
++        // Branch prompts are skipped and the global transcription prompt is used.
++        return try await enhanceTextForCurrentMode(text, sessionID: nil, usesAppBranch: false)
++    }
++
++    private func finalizeLocalAPIText(_ text: String) -> LocalAPIFinalText {
++        let context = Self.preparedDeliveryContext(
++            originalText: text,
++            llmDurationSeconds: nil,
++            sessionOutputMode: .transcription,
++            userMainLanguage: userMainLanguage,
++            matcher: dictionaryStore.makeMatcherIfEnabled(for: text, activeGroupID: activeDictionaryGroupID()),
++            usesConservativeEvidence: false,
++            automaticReplacementEnabled: UserDefaults.standard.bool(
++                forKey: AppPreferenceKey.dictionaryHighConfidenceCorrectionEnabled
++            )
++        )
++        dictionaryStore.recordMatches(context.dictionaryMatches)
++        return LocalAPIFinalText(
++            text: context.outputText,
++            dictionaryHitTerms: Self.orderedUniqueDictionaryTerms(from: context.dictionaryMatches.map(\.term)),
++            dictionaryCorrectedTerms: Self.orderedUniqueDictionaryTerms(from: context.dictionaryCorrectedTerms)
++        )
++    }
++
++    private func recordLocalAPIHistory(_ outcome: LocalAPIDictationOutcome) {
++        guard historyEnabled else { return }
++        let textModel = outcome.usedEnhancement
++            ? resolvedHistoryTextModelMetadata(for: .normal)
++            : HistoryTextModelMetadata(
++                modeTitle: EnhancementMode.off.title,
++                modelTitle: "None",
++                remoteProviderTitle: nil,
++                remoteModelTitle: nil,
++                remoteEndpoint: nil
++            )
++        let transcriptionModel = localAPITranscriptionModelMetadata()
++
++        _ = historyStore.append(
++            entryID: outcome.id,
++            text: outcome.text,
++            transcriptionEngine: transcriptionEngine.title,
++            transcriptionModel: transcriptionModel.title,
++            enhancementMode: textModel.modeTitle,
++            enhancementModel: textModel.modelTitle,
++            kind: .normal,
++            isTranslation: false,
++            audioDurationSeconds: nil,
++            transcriptionProcessingDurationSeconds: outcome.transcriptionSeconds,
++            llmDurationSeconds: outcome.enhancementSeconds,
++            focusedAppName: Self.localAPISourceName,
++            focusedAppBundleID: nil,
++            matchedGroupID: nil,
++            matchedGroupName: nil,
++            matchedAppGroupName: nil,
++            matchedURLGroupName: nil,
++            remoteASRProvider: transcriptionModel.remoteProvider,
++            remoteASRModel: transcriptionModel.remoteModel,
++            remoteASREndpoint: nil,
++            remoteLLMProvider: textModel.remoteProviderTitle,
++            remoteLLMModel: textModel.remoteModelTitle,
++            remoteLLMEndpoint: textModel.remoteEndpoint,
++            whisperWordTimings: nil,
++            dictionaryHitTerms: outcome.dictionaryHitTerms,
++            dictionaryCorrectedTerms: outcome.dictionaryCorrectedTerms,
++            dictionarySuggestedTerms: []
++        )
++    }
++}
++
++enum LocalAPIServerStatus: Equatable {
++    case off
++    case starting
++    case listening(port: Int)
++    case failed(String)
++}
++
++struct LocalAPIError: LocalizedError {
++    var message: String
++    var errorDescription: String? { message }
++}
+diff --git a/Voxt/Voxt/App/LocalAPITranscription.swift b/Voxt/Voxt/App/LocalAPITranscription.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3bb38db74ce94db63d42d5c5d891554d6a44775
+--- /dev/null
++++ b/Voxt/Voxt/App/LocalAPITranscription.swift
+@@ -0,0 +1,106 @@
++// LocalAPITranscription.swift
++// Provides the only Local API code that knows the transcription engines: a recorded file in,
++// the selected engine's normalized text out, plus model readiness and the names saved to history.
++
++import Foundation
++
++extension AppDelegate {
++    struct LocalAPITranscriptionModelMetadata {
++        var title: String
++        var remoteProvider: String?
++        var remoteModel: String?
++    }
++
++    func transcribeLocalAPIAudio(at url: URL) async throws -> String {
++        prepareLegacySettingsForSession(outputMode: .transcription)
++        synchronizeRuntimeASRStateForSession(outputMode: .transcription)
++
++        let text: String
++        switch transcriptionEngine {
++        case .mlxAudio:
++            let context = currentLocalASRStartContext()
++            let decision = RecordingStartPlanner.resolve(
++                selectedEngine: .mlxAudio,
++                selectedMLXRepo: context.selectedMLXRepo,
++                activeMLXDownloadRepo: context.activeMLXDownloadRepo,
++                isSelectedMLXModelDownloaded: context.isSelectedMLXModelDownloaded,
++                mlxModelState: context.mlxModelState
++            )
++            if case let .blocked(reason) = decision {
++                throw LocalAPIError(message: reason.userMessage)
++            }
++            let transcriber = mlxTranscriber ?? MLXTranscriber(modelManager: mlxModelManager)
++            mlxTranscriber = transcriber
++            text = try await transcriber.transcribeAudioFile(url)
++        case .remote:
++            text = try await remoteASRTranscriber.transcribeMeetingAudioFile(url)
++        case .dictation:
++            throw LocalAPIError(message: AppLocalization.localizedString(
++                "Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription."
++            ))
++        }
++
++        return RecordingSessionSupport.normalizedTranscriptionDisplayText(
++            text,
++            transcriptionEngine: transcriptionEngine,
++            remoteProvider: remoteASRSelectedProvider,
++            userMainLanguage: userMainLanguage
++        )
++    }
++
++    func localAPITranscriptionModelMetadata() -> LocalAPITranscriptionModelMetadata {
++        switch transcriptionEngine {
++        case .dictation:
++            return LocalAPITranscriptionModelMetadata(title: "Apple Speech Recognition")
++        case .mlxAudio:
++            let repo = mlxModelManager.currentModelRepo
++            return LocalAPITranscriptionModelMetadata(title: "\(mlxModelManager.displayTitle(for: repo)) (\(repo))")
++        case .remote:
++            let provider = remoteASRSelectedProvider
++            let model = remoteASRConfigurations[provider.rawValue]?.model
++            return LocalAPITranscriptionModelMetadata(
++                title: model.map { "\(provider.title) (\($0))" } ?? provider.title,
++                remoteProvider: provider.title,
++                remoteModel: model
++            )
++        }
++    }
++
++    func localAPIModelStatus() -> LocalAPIModelStatus {
++        let transcription: LocalAPIModelReadiness
++        switch transcriptionEngine {
++        case .dictation:
++            transcription = .unsupported
++        case .mlxAudio:
++            transcription = currentLocalASRStartContext().isSelectedMLXModelDownloaded ? .ready : .missing
++        case .remote:
++            let provider = remoteASRSelectedProvider
++            let isConfigured = remoteASRConfigurations[provider.rawValue] != nil
++                && RemoteModelConfigurationStore.resolvedASRConfiguration(
++                    provider: provider,
++                    stored: remoteASRConfigurations
++                ).isConfigured
++            transcription = isConfigured ? .ready : .missing
++        }
++
++        let text: LocalAPIModelReadiness
++        switch enhancementMode {
++        case .off:
++            text = .off
++        case .customLLM:
++            let isInstalled = resolvedTranscriptionEnhancementLocalRepo().map { repo in
++                customLLMManager.canAttemptInference(repo: repo)
++            } ?? false
++            text = isInstalled ? .ready : .missing
++        case .remoteLLM:
++            let isConfigured = RemoteModelConfigurationStore.isStoredLLMConfigurationConfigured(
++                provider: resolvedRemoteLLMContext(forTranslation: false).provider,
++                stored: remoteLLMConfigurations
++            )
++            text = isConfigured ? .ready : .missing
++        case .appleIntelligence:
++            text = .ready
++        }
++        return LocalAPIModelStatus(transcription: transcription, text: text)
++    }
++}
+diff --git a/Voxt/Voxt/App/PreferencesHistoryWindow.swift b/Voxt/Voxt/App/PreferencesHistoryWindow.swift
+index a2dac1c59d7b8c5b83761d202ac5a0f5c6e4bf06..99c725e5c89b2dadcffe36c661d65d98f8199a5b 100644
+--- a/Voxt/Voxt/App/PreferencesHistoryWindow.swift
++++ b/Voxt/Voxt/App/PreferencesHistoryWindow.swift
+@@ -6,7 +6,7 @@ import AppKit
+ import CoreAudio
+ 
+ extension AppDelegate {
+-    private struct HistoryTextModelMetadata {
++    struct HistoryTextModelMetadata {
+         let modeTitle: String
+         let modelTitle: String
+         let remoteProviderTitle: String?
+@@ -571,7 +571,7 @@ extension AppDelegate {
+         HistoryValueResolver.resolvedKind(for: outputMode)
+     }
+ 
+-    private func resolvedHistoryTextModelMetadata(for kind: TranscriptionHistoryKind) -> HistoryTextModelMetadata {
++    func resolvedHistoryTextModelMetadata(for kind: TranscriptionHistoryKind) -> HistoryTextModelMetadata {
+         switch kind {
+         case .normal:
+             guard transcriptionFeatureSettings.llmEnabled else {
+diff --git a/Voxt/Voxt/App/TranscriptionFlow.swift b/Voxt/Voxt/App/TranscriptionFlow.swift
+index 93fd91a90b49dbba83929bf121519babf29870a2..48853c0a10851ff61e9d6645f3226045dd668353 100644
+--- a/Voxt/Voxt/App/TranscriptionFlow.swift
++++ b/Voxt/Voxt/App/TranscriptionFlow.swift
+@@ -122,7 +122,8 @@ extension AppDelegate {
+ 
+     func enhanceTextForCurrentMode(
+         _ text: String,
+-        sessionID: UUID? = nil
++        sessionID: UUID? = nil,
++        usesAppBranch: Bool = true
+     ) async throws -> String {
+         guard let provider = resolvedTranscriptionEnhancementProvider() else {
+             return text
+@@ -137,7 +138,8 @@ extension AppDelegate {
+         )
+         let promptResolution = resolvedEnhancementPrompt(
+             rawTranscription: text,
+-            glossarySelectionPolicy: provisionalStrategy.glossarySelectionPolicy
++            glossarySelectionPolicy: provisionalStrategy.glossarySelectionPolicy,
++            usesAppBranch: usesAppBranch
+         )
+         let strategy = TaskLLMStrategyResolver.resolve(
+             taskKind: .transcriptionEnhancement,
+diff --git a/Voxt/Voxt/App/VoxtApp.swift b/Voxt/Voxt/App/VoxtApp.swift
+index be6320e70ab0b867a77f8aab4b75d5ae82faed98..b881ef03d3364928a3d6afb2e6e315102f17b61c 100644
+--- a/Voxt/Voxt/App/VoxtApp.swift
++++ b/Voxt/Voxt/App/VoxtApp.swift
+@@ -111,6 +111,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
+     let speechTranscriber = SpeechTranscriber()
+     var mlxTranscriber: MLXTranscriber?
+     let remoteASRTranscriber = RemoteASRTranscriber()
++    var localAPIServer: LocalAPIServer?
++    var localAPIServerPort: Int?
++    var localAPIServerStatus: LocalAPIServerStatus = .off {
++        didSet {
++            guard localAPIServerStatus != oldValue else { return }
++            NotificationCenter.default.post(name: .voxtLocalAPIStatusDidChange, object: nil)
++        }
++    }
++    var localAPISettingsObserver: NSObjectProtocol?
++    var localAPIActivity: NSObjectProtocol?
+     let mlxModelManager: MLXModelManager
+     let customLLMManager: CustomLLMModelManager
+     let ggufTranslationModelManager: GGUFTranslationModelManager
+@@ -321,6 +331,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
+         )
+         ggufTranslationModelManager = GGUFTranslationModelManager(modelID: ggufModelID)
+         UserDefaults.standard.register(defaults: [
++            AppPreferenceKey.localAPIServerEnabled: false,
++            AppPreferenceKey.localAPIServerPort: LocalAPISettings.defaultPort,
+             AppPreferenceKey.interactionSoundsEnabled: true,
+             AppPreferenceKey.interactionSoundPreset: InteractionSoundPreset.soft.rawValue,
+             AppPreferenceKey.muteSystemAudioWhileRecording: false,
+@@ -547,6 +559,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
+             }
+         }
+         meetingFileTaskQueue.startIfNeeded()
++        applyLocalAPIServerLifecycle()
++        localAPISettingsObserver = NotificationCenter.default.addObserver(
++            forName: .voxtLocalAPISettingsDidChange,
++            object: nil,
++            queue: .main
++        ) { [weak self] _ in
++            Task { @MainActor [weak self] in
++                self?.applyLocalAPIServerLifecycle()
++            }
++        }
+ 
+         SileroVADModelProvisioner.prefetchIfNeeded(for: LocalVADMode.stored())
+         RemoteModelConfigurationStore.migrateLegacyStoredSecrets()
+@@ -787,6 +809,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
+         VoxtLog.info("Application termination cleanup started.")
+ 
+         hotkeyManager.stop()
++        stopLocalAPIServer()
+         let activeLLMTasks = cancelActiveLLMRequest()
+         let recordingCaptureStartTasks = cancelRecordingCaptureStartTask()
+         let pendingTranscriptionStart = pendingTranscriptionStartTask
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..f52b5dc6a68da48e3c6df8a4b6a78a5e6a3d08ec
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+@@ -0,0 +1,147 @@
++// LocalAPIDictationPipeline.swift
++// Provides the audio-to-text steps for one Local API dictation, with the Voxt-specific
++// work (ASR, enhancement, dictionary, history) injected by the app.
++
++import AVFoundation
++import Foundation
++
++struct LocalAPIFinalText: Equatable {
++    var text: String
++    var dictionaryHitTerms: [String] = []
++    var dictionaryCorrectedTerms: [String] = []
++}
++
++struct LocalAPIDictationOutcome: Equatable {
++    var id: UUID
++    var text: String
++    var rawText: String
++    var usedEnhancement: Bool
++    var transcriptionSeconds: TimeInterval
++    var enhancementSeconds: TimeInterval?
++    var dictionaryHitTerms: [String]
++    var dictionaryCorrectedTerms: [String]
++}
++
++private struct LocalAPIDictationResponseBody: Encodable {
++    var id: String
++    var text: String
++    var rawText: String
++    var enhanced: Bool
++    var asrMs: Int
++    var enhanceMs: Int
++}
++
++final class LocalAPIDictationPipeline {
++    let temporaryDirectory: URL
++    /// Returns why the Mac can't take a dictation right now (it is recording, in a meeting, …).
++    let busyReason: () -> String?
++    let isReadableAudio: (URL) -> Bool
++    /// Audio file → normalized transcript, using the engine selected in Voxt.
++    let transcribe: (URL) async throws -> String
++    /// Transcript → cleaned-up text, using Voxt's transcription enhancement settings.
++    let enhance: (String) async throws -> String
++    /// Applies dictionary corrections to the final text.
++    let finalize: (String) -> LocalAPIFinalText
++    let record: (LocalAPIDictationOutcome) -> Void
++
++    private var isRunning = false
++
++    init(
++        temporaryDirectory: URL,
++        busyReason: @escaping () -> String?,
++        isReadableAudio: @escaping (URL) -> Bool = LocalAPIDictationPipeline.isReadableAudioFile,
++        transcribe: @escaping (URL) async throws -> String,
++        enhance: @escaping (String) async throws -> String,
++        finalize: @escaping (String) -> LocalAPIFinalText,
++        record: @escaping (LocalAPIDictationOutcome) -> Void
++    ) {
++        self.temporaryDirectory = temporaryDirectory
++        self.busyReason = busyReason
++        self.isReadableAudio = isReadableAudio
++        self.transcribe = transcribe
++        self.enhance = enhance
++        self.finalize = finalize
++        self.record = record
++    }
++
++    static func isReadableAudioFile(_ url: URL) -> Bool {
++        (try? AVAudioFile(forReading: url)) != nil
++    }
++
++    func run(_ request: LocalAPIDictationRequest) async -> LocalAPIHTTPResponse {
++        if let reason = busyReason() {
++            return .error(status: 503, reason)
++        }
++        guard !isRunning else {
++            return .error(status: 503, "Voxt is still working on the previous dictation.")
++        }
++        isRunning = true
++        defer { isRunning = false }
++
++        let audioURL = temporaryDirectory.appendingPathComponent("local-api-\(UUID().uuidString).\(request.fileExtension)")
++        defer { try? FileManager.default.removeItem(at: audioURL) }
++
++        do {
++            try request.audio.write(to: audioURL, options: .atomic)
++        } catch {
++            VoxtLog.warning("Local API could not store the audio: \(error.localizedDescription)")
++            return .error(status: 500, error.localizedDescription)
++        }
++        guard isReadableAudio(audioURL) else {
++            return .error(status: 400, "The audio could not be read.")
++        }
++
++        let rawText: String
++        let transcriptionStart = Date()
++        do {
++            rawText = try await transcribe(audioURL).trimmingCharacters(in: .whitespacesAndNewlines)
++        } catch {
++            VoxtLog.warning("Local API transcription failed: \(error.localizedDescription)")
++            return .error(status: 500, error.localizedDescription)
++        }
++        let transcriptionSeconds = Date().timeIntervalSince(transcriptionStart)
++
++        guard !rawText.isEmpty else {
++            return .error(status: 422, "No speech detected.")
++        }
++
++        var text = rawText
++        var usedEnhancement = false
++        var enhancementSeconds: TimeInterval?
++        if request.enhance {
++            let enhancementStart = Date()
++            do {
++                let enhanced = try await enhance(rawText).trimmingCharacters(in: .whitespacesAndNewlines)
++                if !enhanced.isEmpty {
++                    text = enhanced
++                    usedEnhancement = true
++                }
++            } catch {
++                VoxtLog.warning("Local API enhancement failed, returning raw transcript: \(error.localizedDescription)")
++            }
++            enhancementSeconds = Date().timeIntervalSince(enhancementStart)
++        }
++
++        let final = finalize(text)
++        let outcome = LocalAPIDictationOutcome(
++            id: UUID(),
++            text: final.text,
++            rawText: rawText,
++            usedEnhancement: usedEnhancement,
++            transcriptionSeconds: transcriptionSeconds,
++            enhancementSeconds: enhancementSeconds,
++            dictionaryHitTerms: final.dictionaryHitTerms,
++            dictionaryCorrectedTerms: final.dictionaryCorrectedTerms
++        )
++        record(outcome)
++
++        return .json(status: 200, LocalAPIDictationResponseBody(
++            id: outcome.id.uuidString,
++            text: outcome.text,
++            rawText: outcome.rawText,
++            enhanced: usedEnhancement,
++            asrMs: Int(transcriptionSeconds * 1000),
++            enhanceMs: Int((enhancementSeconds ?? 0) * 1000)
++        ))
++    }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIHTTP.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIHTTP.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..19b1bbb699616c7dc2f9f9776f0645247c9be673
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIHTTP.swift
+@@ -0,0 +1,134 @@
++// LocalAPIHTTP.swift
++// Provides the minimal HTTP/1.1 request parsing and response encoding used by the Local API server.
++
++import Foundation
++
++nonisolated struct LocalAPIHTTPRequest: Equatable, Sendable {
++    var method: String
++    var path: String
++    var query: [String: String]
++    /// Header names are stored lowercased.
++    var headers: [String: String]
++    var body: Data
++
++    init(method: String, path: String, query: [String: String] = [:], headers: [String: String] = [:], body: Data = Data()) {
++        self.method = method
++        self.path = path
++        self.query = query
++        self.headers = Dictionary(headers.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { _, last in last })
++        self.body = body
++    }
++
++    func header(_ name: String) -> String? {
++        headers[name.lowercased()]
++    }
++}
++
++nonisolated enum LocalAPIHTTPParseResult: Equatable, Sendable {
++    case incomplete
++    case complete(LocalAPIHTTPRequest, consumed: Int)
++    /// The HTTP status to answer with before closing the connection.
++    case failure(Int)
++}
++
++nonisolated enum LocalAPIHTTPParser {
++    static let maxHeaderBytes = 16 * 1024
++    private static let headerTerminator = Data("\r\n\r\n".utf8)
++
++    /// Parses one request from the start of `data`. Only `Content-Length` bodies are accepted;
++    /// clients that stream chunked bodies get 411.
++    static func parse(_ data: Data, maxBodyBytes: Int) -> LocalAPIHTTPParseResult {
++        guard let terminator = data.range(of: headerTerminator) else {
++            return data.count > maxHeaderBytes ? .failure(431) : .incomplete
++        }
++        guard terminator.lowerBound - data.startIndex <= maxHeaderBytes else { return .failure(431) }
++        guard let head = String(data: data[data.startIndex..<terminator.lowerBound], encoding: .utf8) else {
++            return .failure(400)
++        }
++
++        var lines = head.components(separatedBy: "\r\n")
++        let requestLine = lines.removeFirst().split(separator: " ", omittingEmptySubsequences: true)
++        guard requestLine.count == 3, requestLine[2].hasPrefix("HTTP/1."),
++              let components = URLComponents(string: String(requestLine[1])) else {
++            return .failure(400)
++        }
++
++        var headers: [String: String] = [:]
++        for line in lines where !line.isEmpty {
++            guard let colon = line.firstIndex(of: ":") else { return .failure(400) }
++            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
++            headers[name] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
++        }
++
++        if let encoding = headers["transfer-encoding"], encoding.lowercased() != "identity" {
++            return .failure(411)
++        }
++        var bodyLength = 0
++        if let lengthText = headers["content-length"] {
++            guard let length = Int(lengthText), length >= 0 else { return .failure(400) }
++            bodyLength = length
++        }
++        guard bodyLength <= maxBodyBytes else { return .failure(413) }
++
++        let bodyStart = terminator.upperBound
++        guard data.endIndex - bodyStart >= bodyLength else { return .incomplete }
++        let body = Data(data[bodyStart..<(bodyStart + bodyLength)])
++
++        var query: [String: String] = [:]
++        for item in components.queryItems ?? [] { query[item.name] = item.value ?? "" }
++
++        let request = LocalAPIHTTPRequest(
++            method: String(requestLine[0]).uppercased(),
++            path: components.path,
++            query: query,
++            headers: headers,
++            body: body
++        )
++        return .complete(request, consumed: bodyStart + bodyLength - data.startIndex)
++    }
++}
++
++nonisolated struct LocalAPIHTTPResponse: Equatable, Sendable {
++    var status: Int
++    var contentType: String
++    var body: Data
++
++    static func json(status: Int, _ object: some Encodable) -> LocalAPIHTTPResponse {
++        let encoder = JSONEncoder()
++        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
++        let body = (try? encoder.encode(object)) ?? Data("{}".utf8)
++        return LocalAPIHTTPResponse(status: status, contentType: "application/json; charset=utf-8", body: body)
++    }
++
++    static func error(status: Int, _ message: String) -> LocalAPIHTTPResponse {
++        json(status: status, ["error": message])
++    }
++
++    func serialized() -> Data {
++        var head = "HTTP/1.1 \(status) \(Self.reasonPhrase(status))\r\n"
++        head += "Content-Type: \(contentType)\r\n"
++        head += "Content-Length: \(body.count)\r\n"
++        head += "Cache-Control: no-store\r\n"
++        head += "Connection: close\r\n\r\n"
++        return Data(head.utf8) + body
++    }
++
++    static func reasonPhrase(_ status: Int) -> String {
++        switch status {
++        case 200: "OK"
++        case 400: "Bad Request"
++        case 401: "Unauthorized"
++        case 403: "Forbidden"
++        case 404: "Not Found"
++        case 409: "Conflict"
++        case 405: "Method Not Allowed"
++        case 411: "Length Required"
++        case 413: "Content Too Large"
++        case 415: "Unsupported Media Type"
++        case 422: "Unprocessable Content"
++        case 431: "Request Header Fields Too Large"
++        case 503: "Service Unavailable"
++        default: status < 500 ? "Client Error" : "Internal Server Error"
++        }
++    }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac054c04fce473a9777c67f87752ae50dec5f8e9
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
+@@ -0,0 +1,72 @@
++// LocalAPIRequestHandler.swift
++// Provides the Local API request handler. Parsing, token checks and health answers stay off
++// the main actor, so an idle or busy Voxt still answers quickly; only dictations hop to it.
++
++import Foundation
++
++nonisolated enum LocalAPIModelReadiness: String, Encodable, Sendable {
++    case ready, missing, off, unsupported
++}
++
++nonisolated struct LocalAPIModelStatus: Encodable, Sendable {
++    var transcription: LocalAPIModelReadiness
++    var text: LocalAPIModelReadiness
++}
++
++nonisolated enum LocalAPIRequestHandler {
++    private struct Health: Encodable {
++        var ok: Bool
++        var app: String
++        var version: String
++    }
++
++    private struct Capabilities: Encodable {
++        struct APIVersion: Encodable {
++            var major: Int
++            var minor: Int
++        }
++
++        struct Audio: Encodable {
++            var contentTypes: [String]
++            var maxBodyBytes: Int
++        }
++
++        var api: APIVersion
++        var app: String
++        var version: String
++        var endpoints: [String]
++        var audio: Audio
++        var models: LocalAPIModelStatus
++    }
++
++    static func make(
++        router: LocalAPIRouter,
++        version: String,
++        modelStatus: @escaping @MainActor @Sendable () -> LocalAPIModelStatus,
++        dictate: @escaping @MainActor @Sendable (LocalAPIDictationRequest) async -> LocalAPIHTTPResponse
++    ) -> LocalAPIServer.Handler {
++        { request in
++            switch router.route(request) {
++            case .health:
++                return .json(status: 200, Health(ok: true, app: "Voxt", version: version))
++            case .capabilities:
++                let models = await modelStatus()
++                return .json(status: 200, Capabilities(
++                    api: .init(major: 1, minor: 0),
++                    app: "Voxt",
++                    version: version,
++                    endpoints: ["health", "capabilities", "dictations"],
++                    audio: .init(
++                        contentTypes: LocalAPIRouter.audioExtensions.keys.sorted(),
++                        maxBodyBytes: router.maxBodyBytes
++                    ),
++                    models: models
++                ))
++            case let .reject(response):
++                return response
++            case let .dictation(dictation):
++                return await dictate(dictation)
++            }
++        }
++    }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2079fc5a1bb211048b2a3dc64c3e45378aaf60a
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
+@@ -0,0 +1,96 @@
++// LocalAPIRouter.swift
++// Provides token checks and request routing for the Local API server.
++
++import Foundation
++import Security
++
++nonisolated struct LocalAPIDictationRequest: Equatable, Sendable {
++    var audio: Data
++    var fileExtension: String
++    var enhance: Bool
++}
++
++nonisolated enum LocalAPIRoute: Equatable, Sendable {
++    case health
++    case capabilities
++    case dictation(LocalAPIDictationRequest)
++    case reject(LocalAPIHTTPResponse)
++}
++
++nonisolated struct LocalAPIRouter: Sendable {
++    /// Audio types AVAudioFile can read, mapped to the file extension it needs.
++    static let audioExtensions: [String: String] = [
++        "audio/wav": "wav",
++        "audio/wave": "wav",
++        "audio/x-wav": "wav",
++        "audio/mp4": "m4a",
++        "audio/m4a": "m4a",
++        "audio/x-m4a": "m4a",
++        "audio/aac": "aac",
++        "audio/mpeg": "mp3",
++        "audio/x-caf": "caf",
++    ]
++
++    let token: String
++    let maxBodyBytes: Int
++
++    func route(_ request: LocalAPIHTTPRequest) -> LocalAPIRoute {
++        guard isAuthorized(request) else {
++            return .reject(.error(status: 401, "Missing or wrong access token."))
++        }
++
++        switch request.path {
++        case "/v1/health":
++            guard request.method == "GET" else { return .reject(.error(status: 405, "Use GET.")) }
++            return .health
++        case "/v1/capabilities":
++            guard request.method == "GET" else { return .reject(.error(status: 405, "Use GET.")) }
++            return .capabilities
++        case "/v1/dictations":
++            guard request.method == "POST" else { return .reject(.error(status: 405, "Use POST.")) }
++            guard !request.body.isEmpty else { return .reject(.error(status: 400, "The request has no audio.")) }
++            let mediaType = request.header("content-type")?
++                .split(separator: ";").first?
++                .trimmingCharacters(in: .whitespaces).lowercased() ?? ""
++            guard let fileExtension = Self.audioExtensions[mediaType] else {
++                return .reject(.error(status: 415, "Send audio/wav or audio/mp4."))
++            }
++            return .dictation(LocalAPIDictationRequest(
++                audio: request.body,
++                fileExtension: fileExtension,
++                enhance: request.query["enhance"] != "0"
++            ))
++        default:
++            return .reject(.error(status: 404, "Unknown path."))
++        }
++    }
++
++    private func isAuthorized(_ request: LocalAPIHTTPRequest) -> Bool {
++        guard !token.isEmpty, let header = request.header("authorization"), header.hasPrefix("Bearer ") else {
++            return false
++        }
++        return Self.constantTimeEquals(Array(header.dropFirst("Bearer ".count).utf8), Array(token.utf8))
++    }
++
++    private static func constantTimeEquals(_ lhs: [UInt8], _ rhs: [UInt8]) -> Bool {
++        var difference = UInt8(truncatingIfNeeded: lhs.count ^ rhs.count)
++        for index in 0..<max(lhs.count, rhs.count) {
++            let a = index < lhs.count ? lhs[index] : 0
++            let b = index < rhs.count ? rhs[index] : 0
++            difference |= a ^ b
++        }
++        return difference == 0
++    }
++
++    /// 32 random bytes, base64url without padding (43 characters).
++    static func generateToken() -> String {
++        var bytes = [UInt8](repeating: 0, count: 32)
++        if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
++            bytes = (0..<32).map { _ in UInt8.random(in: .min ... .max) }
++        }
++        return Data(bytes).base64EncodedString()
++            .replacingOccurrences(of: "+", with: "-")
++            .replacingOccurrences(of: "/", with: "_")
++            .replacingOccurrences(of: "=", with: "")
++    }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIServer.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIServer.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..94b8c7d206384e2a955d9ccf7a6ef9efabb4dbb7
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIServer.swift
+@@ -0,0 +1,125 @@
++// LocalAPIServer.swift
++// Provides the loopback-only HTTP listener behind the Local API. Other devices can reach it only
++// through a tunnel the user runs, never directly.
++
++import Foundation
++import Network
++
++nonisolated final class LocalAPIServer: @unchecked Sendable {
++    typealias Handler = @Sendable (LocalAPIHTTPRequest) async -> LocalAPIHTTPResponse
++
++    enum ServerError: LocalizedError {
++        case invalidPort(UInt16)
++        case failed(String)
++
++        var errorDescription: String? {
++            switch self {
++            case let .invalidPort(port): "Port \(port) can't be used."
++            case let .failed(reason): reason
++            }
++        }
++    }
++
++    /// A client that stops sending mid-request is dropped after this long.
++    static let requestTimeout: TimeInterval = 60
++
++    private let requestedPort: UInt16
++    private let maxBodyBytes: Int
++    private let handler: Handler
++    private let queue = DispatchQueue(label: "com.voxt.remote-input.server")
++    private var listener: NWListener?
++
++    init(port: UInt16, maxBodyBytes: Int, handler: @escaping Handler) {
++        requestedPort = port
++        self.maxBodyBytes = maxBodyBytes
++        self.handler = handler
++    }
++
++    /// Starts listening on 127.0.0.1 and returns the bound port (useful when `port` is 0).
++    func start() async throws -> UInt16 {
++        let port: NWEndpoint.Port
++        if requestedPort == 0 {
++            port = .any
++        } else if let fixed = NWEndpoint.Port(rawValue: requestedPort) {
++            port = fixed
++        } else {
++            throw ServerError.invalidPort(requestedPort)
++        }
++
++        let parameters = NWParameters.tcp
++        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
++        parameters.allowLocalEndpointReuse = true
++        let listener = try NWListener(using: parameters)
++        self.listener = listener
++
++        return try await withCheckedThrowingContinuation { continuation in
++            // All callbacks run on `queue`; the handler is cleared after the first terminal state
++            // so the continuation resumes exactly once.
++            listener.stateUpdateHandler = { [weak listener] state in
++                switch state {
++                case .ready:
++                    listener?.stateUpdateHandler = nil
++                    continuation.resume(returning: listener?.port?.rawValue ?? 0)
++                case let .failed(error):
++                    listener?.stateUpdateHandler = nil
++                    continuation.resume(throwing: ServerError.failed(error.localizedDescription))
++                case .cancelled:
++                    listener?.stateUpdateHandler = nil
++                    continuation.resume(throwing: CancellationError())
++                default:
++                    break
++                }
++            }
++            listener.newConnectionHandler = { [weak self] connection in
++                self?.accept(connection)
++            }
++            listener.start(queue: queue)
++        }
++    }
++
++    func stop() {
++        listener?.cancel()
++        listener = nil
++    }
++
++    private func accept(_ connection: NWConnection) {
++        connection.start(queue: queue)
++        let deadline = DispatchWorkItem { connection.cancel() }
++        queue.asyncAfter(deadline: .now() + Self.requestTimeout, execute: deadline)
++        receive(on: connection, buffer: Data(), deadline: deadline)
++    }
++
++    private func receive(on connection: NWConnection, buffer: Data, deadline: DispatchWorkItem) {
++        connection.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] chunk, _, isComplete, error in
++            guard let self else { return connection.cancel() }
++            var buffer = buffer
++            if let chunk { buffer.append(chunk) }
++
++            switch LocalAPIHTTPParser.parse(buffer, maxBodyBytes: self.maxBodyBytes) {
++            case let .complete(request, _):
++                deadline.cancel()
++                let handler = self.handler
++                Task {
++                    let response = await handler(request)
++                    self.respond(response, on: connection)
++                }
++            case let .failure(status):
++                deadline.cancel()
++                self.respond(.error(status: status, LocalAPIHTTPResponse.reasonPhrase(status)), on: connection)
++            case .incomplete:
++                if isComplete || error != nil {
++                    deadline.cancel()
++                    connection.cancel()
++                } else {
++                    self.receive(on: connection, buffer: buffer, deadline: deadline)
++                }
++            }
++        }
++    }
++
++    private func respond(_ response: LocalAPIHTTPResponse, on connection: NWConnection) {
++        connection.send(content: response.serialized(), contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in
++            connection.cancel()
++        })
++    }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPISettings.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPISettings.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..059ba3b9336e6cca3291ad9586a748a52108209d
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPISettings.swift
+@@ -0,0 +1,58 @@
++// LocalAPISettings.swift
++// Provides stored settings for the Local API server: on/off, port and access token.
++
++import Foundation
++
++nonisolated enum LocalAPISettings {
++    static let defaultPort = 47910
++    static let maxBodyBytes = 25 * 1024 * 1024
++    static let tokenAccount = "localAPIToken"
++
++    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
++        defaults.bool(forKey: AppPreferenceKey.localAPIServerEnabled)
++    }
++
++    static func port(defaults: UserDefaults = .standard) -> Int {
++        let stored = defaults.integer(forKey: AppPreferenceKey.localAPIServerPort)
++        return (1024...65534).contains(stored) ? stored : defaultPort
++    }
++
++    /// Debug builds read the token from this variable so automated end-to-end tests know it.
++    static let tokenEnvironmentKey = "VOXT_LOCAL_API_TOKEN"
++
++    private static let lock = NSLock()
++    /// A token that could not be saved (for example, an unsigned build without Keychain access).
++    /// Kept for the life of the process so the server and Settings show the same one.
++    nonisolated(unsafe) private static var unsavedToken: String?
++
++    /// Returns the access token, creating one the first time.
++    static func token(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
++        #if DEBUG
++        if let override = environment[tokenEnvironmentKey], !override.isEmpty {
++            return override
++        }
++        #endif
++        if let existing = VoxtSecureStorage.string(for: tokenAccount), !existing.isEmpty {
++            return existing
++        }
++        if let unsaved = lock.withLock({ unsavedToken }) {
++            return unsaved
++        }
++        return regenerateToken()
++    }
++
++    @discardableResult
++    static func regenerateToken() -> String {
++        let token = LocalAPIRouter.generateToken()
++        let saved = VoxtSecureStorage.set(token, for: tokenAccount)
++        if !saved {
++            VoxtLog.warning("Local API token could not be saved to the Keychain; it lasts until Voxt quits.")
++        }
++        lock.withLock { unsavedToken = saved ? nil : token }
++        return token
++    }
++
++    static func resetUnsavedTokenForTesting() {
++        lock.withLock { unsavedToken = nil }
++    }
++}
+diff --git a/Voxt/Voxt/Settings/GeneralSettingsView.swift b/Voxt/Voxt/Settings/GeneralSettingsView.swift
+index b5f1fd2a9bf3e49423d0827916165005711a1aff..ceced45ff3aa89fcd66ea1d037af0dc8a67bc015 100644
+--- a/Voxt/Voxt/Settings/GeneralSettingsView.swift
++++ b/Voxt/Voxt/Settings/GeneralSettingsView.swift
+@@ -170,6 +170,10 @@ struct GeneralSettingsView: View {
+ 
+             GeneralSectionDivider()
+ 
++            LocalAPISettingsCard()
++
++            GeneralSectionDivider()
++
+             GeneralAdvancedCard(
+                 isExpanded: $isAdvancedExpanded,
+                 onExpand: scrollToBottomAfterAdvancedExpands
+diff --git a/Voxt/Voxt/Settings/LocalAPISettingsCard.swift b/Voxt/Voxt/Settings/LocalAPISettingsCard.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..755677d3f76d7b15c815dead5dd8eabaefab974f
+--- /dev/null
++++ b/Voxt/Voxt/Settings/LocalAPISettingsCard.swift
+@@ -0,0 +1,112 @@
++// LocalAPISettingsCard.swift
++// Provides the General settings card for the Local API.
++
++import AppKit
++import SwiftUI
++
++private func localized(_ key: String) -> String {
++    AppLocalization.localizedString(key)
++}
++
++private func localizedKey(_ key: String) -> LocalizedStringKey {
++    LocalizedStringKey(localized(key))
++}
++
++struct LocalAPISettingsCard: View {
++    @AppStorage(AppPreferenceKey.localAPIServerEnabled) private var isEnabled = false
++    @AppStorage(AppPreferenceKey.localAPIServerPort) private var port = LocalAPISettings.defaultPort
++    @State private var portText = ""
++    @State private var token = ""
++    @State private var status: LocalAPIServerStatus = .off
++
++    var body: some View {
++        GeneralSettingsCard(title: localizedKey("Local API")) {
++            GeneralToggleRow(
++                title: localizedKey("Allow other apps to dictate through Voxt"),
++                description: localizedKey("Scripts, shortcuts and tools on this Mac send audio over HTTP. Voxt transcribes it with your current model, enhancement and dictionary, and returns the text."),
++                isOn: $isEnabled
++            )
++
++            if isEnabled {
++                Text(statusText)
++                    .font(.caption)
++                    .foregroundStyle(statusIsError ? .red : .secondary)
++
++                GeneralFieldRow(
++                    title: localizedKey("Port"),
++                    description: localizedKey("Voxt listens on 127.0.0.1 only.")
++                ) {
++                    TextField(String(LocalAPISettings.defaultPort), text: $portText)
++                        .textFieldStyle(.plain)
++                        .settingsFieldSurface(width: 90)
++                        .onSubmit(applyPort)
++                }
++
++                GeneralFieldRow(
++                    title: localizedKey("Access token"),
++                    description: localizedKey("Send it as a Bearer token with every request. Regenerating it disconnects existing clients.")
++                ) {
++                    Text(maskedToken)
++                        .font(.system(.caption, design: .monospaced))
++                    Button(localized("Copy")) { copy(token) }
++                        .buttonStyle(SettingsPillButtonStyle(horizontalPadding: 10, height: 28))
++                    Button(localized("Regenerate")) {
++                        token = LocalAPISettings.regenerateToken()
++                        notifySettingsChanged()
++                    }
++                    .buttonStyle(SettingsPillButtonStyle(horizontalPadding: 10, height: 28))
++                }
++            }
++        }
++        .onAppear {
++            portText = String(port)
++            token = LocalAPISettings.token()
++            refreshStatus()
++        }
++        .onChange(of: isEnabled) { _, _ in notifySettingsChanged() }
++        .onReceive(NotificationCenter.default.publisher(for: .voxtLocalAPIStatusDidChange)) { _ in
++            refreshStatus()
++        }
++    }
++
++    private var maskedToken: String {
++        guard token.count > 8 else { return token }
++        return "\(token.prefix(4))…\(token.suffix(4))"
++    }
++
++    private var statusText: String {
++        switch status {
++        case .off: localized("Stopped")
++        case .starting: localized("Starting…")
++        case let .listening(port): String(format: localized("Listening on 127.0.0.1:%d"), port)
++        case let .failed(reason): String(format: localized("Couldn't start: %@"), reason)
++        }
++    }
++
++    private var statusIsError: Bool {
++        if case .failed = status { return true }
++        return false
++    }
++
++    private func applyPort() {
++        guard let value = Int(portText.trimmingCharacters(in: .whitespaces)), (1024...65534).contains(value) else {
++            portText = String(port)
++            return
++        }
++        port = value
++        notifySettingsChanged()
++    }
++
++    private func refreshStatus() {
++        status = AppDelegate.shared?.localAPIServerStatus ?? .off
++    }
++
++    private func notifySettingsChanged() {
++        NotificationCenter.default.post(name: .voxtLocalAPISettingsDidChange, object: nil)
++    }
++
++    private func copy(_ text: String) {
++        NSPasteboard.general.clearContents()
++        NSPasteboard.general.setString(text, forType: .string)
++    }
++}
+diff --git a/Voxt/Voxt/Settings/Shell/AppPreferenceKey.swift b/Voxt/Voxt/Settings/Shell/AppPreferenceKey.swift
+index 7c6e60ecdbdc8c382802d6dc3c69c38e2578b73a..86d789e539722036a2bf0e7fff7ea458a0133b3c 100644
+--- a/Voxt/Voxt/Settings/Shell/AppPreferenceKey.swift
++++ b/Voxt/Voxt/Settings/Shell/AppPreferenceKey.swift
+@@ -36,6 +36,8 @@ enum AppPreferenceKey {
+     nonisolated static let modelStorageRootPath = "modelStorageRootPath"
+     static let modelStorageRootBookmark = "modelStorageRootBookmark"
+     static let useHfMirror = "useHfMirror"
++    nonisolated static let localAPIServerEnabled = "localAPIServerEnabled"
++    nonisolated static let localAPIServerPort = "localAPIServerPort"
+     static let modelDownloadSourceSelections = "modelDownloadSourceSelections"
+     static let hiddenModelVisibilityIDs = "hiddenModelVisibilityIDs"
+     nonisolated static let hotkeyInputType = "hotkeyInputType"
+diff --git a/Voxt/Voxt/Settings/Shell/SettingsTypes.swift b/Voxt/Voxt/Settings/Shell/SettingsTypes.swift
+index f17878b01615802ccf11faebadf2435673d3e42b..401fcf98cc3d10f203264d4d2ee3cf9ecf27ec2f 100644
+--- a/Voxt/Voxt/Settings/Shell/SettingsTypes.swift
++++ b/Voxt/Voxt/Settings/Shell/SettingsTypes.swift
+@@ -17,6 +17,8 @@ nonisolated extension Notification.Name {
+     static let voxtMeetingFileResourceWaitDidChange = Notification.Name("voxt.meeting-file.resource-wait.did-change")
+     static let voxtHotkeyDidTrigger = Notification.Name("voxt.hotkey.did-trigger")
+     static let voxtModelStorageAuthorizationDidChange = Notification.Name("voxt.model-storage.authorization.did-change")
++    static let voxtLocalAPISettingsDidChange = Notification.Name("voxt.local-api.settings.did-change")
++    static let voxtLocalAPIStatusDidChange = Notification.Name("voxt.local-api.status.did-change")
+ }
+ 
+ nonisolated enum AppInterfaceLanguage: String, CaseIterable, Identifiable {
+diff --git a/Voxt/Voxt/Voxt.entitlements b/Voxt/Voxt/Voxt.entitlements
+index 732768d77524abd9acf85728fc66e5eadd029ca7..c817e052daf9de1e89a24e57c1867344c3b4cabd 100644
+--- a/Voxt/Voxt/Voxt.entitlements
++++ b/Voxt/Voxt/Voxt.entitlements
+@@ -42,6 +42,10 @@
+ 	<key>com.apple.security.network.client</key>
+ 	<true/>
+ 
++	<!-- Incoming loopback connections for the Local API (off by default) -->
++	<key>com.apple.security.network.server</key>
++	<true/>
++
+ 	<!-- Apple Events to supported browsers for active-tab URL -->
+ 	<key>com.apple.security.temporary-exception.apple-events</key>
+ 	<array>
+diff --git a/Voxt/Voxt/en.lproj/Localizable.strings b/Voxt/Voxt/en.lproj/Localizable.strings
+index 4be1be435c59173b608d60b092424780e11f6f47..9621794a11253456e6afbb34b2226a1b5a76ecb0 100644
+--- a/Voxt/Voxt/en.lproj/Localizable.strings
++++ b/Voxt/Voxt/en.lproj/Localizable.strings
+@@ -1889,6 +1889,21 @@
+ "Compiling model..." = "Compiling model...";
+ "Compiling %@" = "Compiling %@";
+ 
++/* Local API */
++"Local API" = "Local API";
++"Allow other apps to dictate through Voxt" = "Allow other apps to dictate through Voxt";
++"Scripts, shortcuts and tools on this Mac send audio over HTTP. Voxt transcribes it with your current model, enhancement and dictionary, and returns the text." = "Scripts, shortcuts and tools on this Mac send audio over HTTP. Voxt transcribes it with your current model, enhancement and dictionary, and returns the text.";
++"Voxt listens on 127.0.0.1 only." = "Voxt listens on 127.0.0.1 only.";
++"Access token" = "Access token";
++"Send it as a Bearer token with every request. Regenerating it disconnects existing clients." = "Send it as a Bearer token with every request. Regenerating it disconnects existing clients.";
++"Stopped" = "Stopped";
++"Starting…" = "Starting…";
++"Listening on 127.0.0.1:%d" = "Listening on 127.0.0.1:%d";
++"Couldn't start: %@" = "Couldn't start: %@";
++"Voxt is recording on the Mac. Try again in a moment." = "Voxt is recording on the Mac. Try again in a moment.";
++"Voxt is recording a meeting on the Mac." = "Voxt is recording a meeting on the Mac.";
++"Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription." = "Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription.";
++
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences.";
+ "Allow" = "Allow";
+diff --git a/Voxt/Voxt/ja.lproj/Localizable.strings b/Voxt/Voxt/ja.lproj/Localizable.strings
+index d76387f254a0c3e6d1d9535567107202bfbbbf73..17a0fa23a4702a357b746bcb815af3d1743273db 100644
+--- a/Voxt/Voxt/ja.lproj/Localizable.strings
++++ b/Voxt/Voxt/ja.lproj/Localizable.strings
+@@ -1842,6 +1842,21 @@
+ "Compiling model..." = "モデルをコンパイル中...";
+ "Compiling %@" = "%@ をコンパイル中";
+ 
++/* Local API */
++"Local API" = "ローカル API";
++"Allow other apps to dictate through Voxt" = "他のアプリから Voxt で音声入力を許可";
++"Scripts, shortcuts and tools on this Mac send audio over HTTP. Voxt transcribes it with your current model, enhancement and dictionary, and returns the text." = "この Mac のスクリプト、ショートカット、ツールが HTTP で音声を送ります。Voxt は現在のモデル、補正、辞書で文字起こしし、テキストを返します。";
++"Voxt listens on 127.0.0.1 only." = "Voxt は 127.0.0.1 でのみ待ち受けます。";
++"Access token" = "アクセストークン";
++"Send it as a Bearer token with every request. Regenerating it disconnects existing clients." = "すべてのリクエストに Bearer トークンとして付けてください。再生成すると既存のクライアントは使えなくなります。";
++"Stopped" = "停止中";
++"Starting…" = "起動中…";
++"Listening on 127.0.0.1:%d" = "127.0.0.1:%d で待ち受け中";
++"Couldn't start: %@" = "起動できませんでした：%@";
++"Voxt is recording on the Mac. Try again in a moment." = "Mac で Voxt が録音中です。少し待ってから再試行してください。";
++"Voxt is recording a meeting on the Mac." = "Mac で Voxt が会議を録音中です。";
++"Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription." = "Apple 音声認識は録音済みの音声を文字起こしできません。Voxt 設定 > 文字起こし でローカルまたはリモートのモデルを選んでください。";
++
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "句読点と段落の流れを整えます。例：話し言葉の間を読みやすい文にします。";
+ "Allow" = "許可";
+diff --git a/Voxt/Voxt/zh-Hans.lproj/Localizable.strings b/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
+index 0a561bc1e2ec16f0f70aa5826fcfed72df71caee..5e788bbcc11797f85a506f60e01d50bdb185f3b9 100644
+--- a/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
++++ b/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
+@@ -1889,6 +1889,21 @@
+ "Compiling model..." = "正在编译模型...";
+ "Compiling %@" = "正在编译 %@";
+ 
++/* Local API */
++"Local API" = "本地 API";
++"Allow other apps to dictate through Voxt" = "允许其他应用通过 Voxt 语音输入";
++"Scripts, shortcuts and tools on this Mac send audio over HTTP. Voxt transcribes it with your current model, enhancement and dictionary, and returns the text." = "这台 Mac 上的脚本、快捷指令和工具通过 HTTP 发送音频。Voxt 用当前的模型、润色和词典转写，并返回文字。";
++"Voxt listens on 127.0.0.1 only." = "Voxt 只监听 127.0.0.1。";
++"Access token" = "访问令牌";
++"Send it as a Bearer token with every request. Regenerating it disconnects existing clients." = "每次请求都以 Bearer 令牌发送。重新生成后，现有客户端需要更新令牌。";
++"Stopped" = "已停止";
++"Starting…" = "正在启动…";
++"Listening on 127.0.0.1:%d" = "正在监听 127.0.0.1:%d";
++"Couldn't start: %@" = "无法启动：%@";
++"Voxt is recording on the Mac. Try again in a moment." = "Mac 上的 Voxt 正在录音，请稍后再试。";
++"Voxt is recording a meeting on the Mac." = "Mac 上的 Voxt 正在录制会议。";
++"Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription." = "Apple 语音识别不能转写录好的音频。请在 Voxt 设置 > 转写 中选择本地或远程模型。";
++
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "补全标点和段落节奏。例如：口语停顿会整理成可读句子。";
+ "Allow" = "授权";
+diff --git a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a04e8e849d77fee1f5e4016ba2674e61219e74d
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+@@ -0,0 +1,190 @@
++// LocalAPIDictationPipelineTests.swift
++// Provides Local API dictation pipeline tests for Voxt test coverage.
++
++import XCTest
++@testable import Voxt
++
++@MainActor
++final class LocalAPIDictationPipelineTests: XCTestCase {
++    private var directory: URL!
++    private var transcribedFiles: [(URL, Data)] = []
++    private var enhancedInputs: [String] = []
++    private var recorded: [LocalAPIDictationOutcome] = []
++
++    override func setUp() async throws {
++        directory = FileManager.default.temporaryDirectory
++            .appendingPathComponent("LocalAPIDictationPipelineTests-\(UUID().uuidString)", isDirectory: true)
++        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++        transcribedFiles = []
++        enhancedInputs = []
++        recorded = []
++    }
++
++    override func tearDown() async throws {
++        try? FileManager.default.removeItem(at: directory)
++    }
++
++    private func makePipeline(
++        busyReason: String? = nil,
++        transcript: Result<String, Error> = .success("嗯 那个 明天下午三点开会"),
++        enhanced: Result<String, Error> = .success("明天下午三点开会。"),
++        transcribeDelay: Duration = .zero,
++        checksAudioWithAVFoundation: Bool = false
++    ) -> LocalAPIDictationPipeline {
++        LocalAPIDictationPipeline(
++            temporaryDirectory: directory,
++            busyReason: { busyReason },
++            isReadableAudio: checksAudioWithAVFoundation ? LocalAPIDictationPipeline.isReadableAudioFile : { _ in true },
++            transcribe: { [unowned self] url in
++                transcribedFiles.append((url, (try? Data(contentsOf: url)) ?? Data()))
++                if transcribeDelay != .zero { try await Task.sleep(for: transcribeDelay) }
++                return try transcript.get()
++            },
++            enhance: { [unowned self] text in
++                enhancedInputs.append(text)
++                return try enhanced.get()
++            },
++            finalize: { text in
++                LocalAPIFinalText(
++                    text: text.replacingOccurrences(of: "开会", with: "开会议"),
++                    dictionaryHitTerms: text.contains("开会") ? ["开会"] : [],
++                    dictionaryCorrectedTerms: text.contains("开会") ? ["开会议"] : []
++                )
++            },
++            record: { [unowned self] in recorded.append($0) }
++        )
++    }
++
++    private func json(_ response: LocalAPIHTTPResponse) throws -> [String: Any] {
++        try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: Any])
++    }
++
++    private let request = LocalAPIDictationRequest(audio: Data([9, 8, 7]), fileExtension: "m4a", enhance: true)
++
++    func testSuccessfulDictationTranscribesEnhancesFinalizesAndRecords() async throws {
++        let pipeline = makePipeline()
++
++        let response = await pipeline.run(request)
++
++        XCTAssertEqual(response.status, 200)
++        let body = try json(response)
++        XCTAssertEqual(body["text"] as? String, "明天下午三点开会议。")
++        XCTAssertEqual(body["rawText"] as? String, "嗯 那个 明天下午三点开会")
++        XCTAssertNotNil(body["id"] as? String)
++        XCTAssertNotNil(body["asrMs"] as? Int)
++        XCTAssertNotNil(body["enhanceMs"] as? Int)
++        XCTAssertEqual(body["enhanced"] as? Bool, true)
++
++        XCTAssertEqual(transcribedFiles.count, 1)
++        XCTAssertEqual(transcribedFiles[0].0.pathExtension, "m4a")
++        XCTAssertEqual(transcribedFiles[0].1, Data([9, 8, 7]))
++        XCTAssertFalse(FileManager.default.fileExists(atPath: transcribedFiles[0].0.path), "audio file should be removed")
++        XCTAssertEqual(enhancedInputs, ["嗯 那个 明天下午三点开会"])
++        XCTAssertEqual(recorded.count, 1)
++        XCTAssertEqual(recorded.first?.text, "明天下午三点开会议。")
++        XCTAssertEqual(recorded.first?.usedEnhancement, true)
++        XCTAssertEqual(recorded.first?.dictionaryHitTerms, ["开会"])
++        XCTAssertEqual(recorded.first?.dictionaryCorrectedTerms, ["开会议"])
++    }
++
++    func testSkippingEnhancementFinalizesRawTranscript() async throws {
++        let pipeline = makePipeline()
++        var noEnhance = request
++        noEnhance.enhance = false
++
++        let response = await pipeline.run(noEnhance)
++
++        XCTAssertEqual(try json(response)["text"] as? String, "嗯 那个 明天下午三点开会议")
++        XCTAssertEqual(try json(response)["enhanced"] as? Bool, false)
++        XCTAssertTrue(enhancedInputs.isEmpty)
++        XCTAssertEqual(recorded.first?.usedEnhancement, false)
++    }
++
++    func testEnhancementFailureFallsBackToRawTranscript() async throws {
++        struct Boom: Error {}
++        let pipeline = makePipeline(enhanced: .failure(Boom()))
++
++        let response = await pipeline.run(request)
++
++        XCTAssertEqual(response.status, 200)
++        XCTAssertEqual(try json(response)["text"] as? String, "嗯 那个 明天下午三点开会议")
++        XCTAssertEqual(try json(response)["enhanced"] as? Bool, false)
++        XCTAssertEqual(recorded.first?.usedEnhancement, false)
++    }
++
++    func testBusyMacRejectsWithoutTranscribing() async throws {
++        let pipeline = makePipeline(busyReason: "Voxt is recording on the Mac.")
++
++        let response = await pipeline.run(request)
++
++        XCTAssertEqual(response.status, 503)
++        XCTAssertEqual(try json(response)["error"] as? String, "Voxt is recording on the Mac.")
++        XCTAssertTrue(transcribedFiles.isEmpty)
++    }
++
++    func testTranscriptionFailureReturns500AndCleansUp() async throws {
++        struct ModelMissing: LocalizedError { var errorDescription: String? { "ASR model is not installed." } }
++        let pipeline = makePipeline(transcript: .failure(ModelMissing()))
++
++        let response = await pipeline.run(request)
++
++        XCTAssertEqual(response.status, 500)
++        XCTAssertEqual(try json(response)["error"] as? String, "ASR model is not installed.")
++        XCTAssertFalse(FileManager.default.fileExists(atPath: transcribedFiles[0].0.path))
++        XCTAssertTrue(recorded.isEmpty)
++    }
++
++    func testSilenceReturns422AndRecordsNothing() async throws {
++        let pipeline = makePipeline(transcript: .success("  \n "))
++
++        let response = await pipeline.run(request)
++
++        XCTAssertEqual(response.status, 422)
++        XCTAssertTrue(enhancedInputs.isEmpty)
++        XCTAssertTrue(recorded.isEmpty)
++    }
++
++    func testSecondRequestWhileRunningIsRejected() async throws {
++        let pipeline = makePipeline(transcribeDelay: .milliseconds(200))
++
++        async let first = pipeline.run(request)
++        try await Task.sleep(for: .milliseconds(50))
++        let second = await pipeline.run(request)
++        let firstResponse = await first
++
++        XCTAssertEqual(second.status, 503)
++        XCTAssertEqual(firstResponse.status, 200)
++    }
++
++    func testUnreadableAudioIsRejectedAs400WithoutTranscribing() async throws {
++        let pipeline = makePipeline(checksAudioWithAVFoundation: true)
++        let corrupt = LocalAPIDictationRequest(audio: Data("not audio".utf8), fileExtension: "wav", enhance: true)
++
++        let response = await pipeline.run(corrupt)
++
++        XCTAssertEqual(response.status, 400)
++        XCTAssertTrue(transcribedFiles.isEmpty)
++        XCTAssertTrue(recorded.isEmpty)
++    }
++
++    func testReadableWAVPassesTheAudioCheck() async throws {
++        let pipeline = makePipeline(checksAudioWithAVFoundation: true)
++        let silence = LocalAPIDictationRequest(audio: Self.pcm16WAV(sampleCount: 1_600), fileExtension: "wav", enhance: false)
++
++        let response = await pipeline.run(silence)
++
++        XCTAssertEqual(response.status, 200)
++        XCTAssertEqual(transcribedFiles.count, 1)
++    }
++
++    /// A 16 kHz mono 16-bit WAV of silence.
++    private static func pcm16WAV(sampleCount: Int) -> Data {
++        func littleEndian<T: FixedWidthInteger>(_ value: T) -> Data { withUnsafeBytes(of: value.littleEndian) { Data($0) } }
++        let dataBytes = UInt32(sampleCount * 2)
++        var wav = Data("RIFF".utf8) + littleEndian(UInt32(36) + dataBytes) + Data("WAVEfmt ".utf8)
++        wav += littleEndian(UInt32(16)) + littleEndian(UInt16(1)) + littleEndian(UInt16(1))
++        wav += littleEndian(UInt32(16_000)) + littleEndian(UInt32(32_000)) + littleEndian(UInt16(2)) + littleEndian(UInt16(16))
++        wav += Data("data".utf8) + littleEndian(dataBytes) + Data(count: Int(dataBytes))
++        return wav
++    }
++}
+diff --git a/Voxt/VoxtTests/LocalAPIHTTPTests.swift b/Voxt/VoxtTests/LocalAPIHTTPTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..b389771fde4794f01a7808a7d60be5780fda675f
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIHTTPTests.swift
+@@ -0,0 +1,87 @@
++// LocalAPIHTTPTests.swift
++// Provides Local API HTTP parsing tests for Voxt test coverage.
++
++import XCTest
++@testable import Voxt
++
++final class LocalAPIHTTPTests: XCTestCase {
++    private func raw(_ head: String, body: Data = Data()) -> Data {
++        Data(head.replacingOccurrences(of: "\n", with: "\r\n").utf8) + body
++    }
++
++    func testParsesCompleteRequestWithBodyQueryAndHeaders() throws {
++        let body = Data([0x52, 0x49, 0x46, 0x46])
++        let data = raw("""
++        POST /v1/dictations?enhance=0 HTTP/1.1
++        Host: mac.tail1.ts.net:8900
++        Authorization: Bearer abc
++        Content-Type: audio/wav
++        Content-Length: 4
++
++
++        """, body: body)
++
++        guard case let .complete(request, consumed) = LocalAPIHTTPParser.parse(data, maxBodyBytes: 1024) else {
++            return XCTFail("Expected a complete request")
++        }
++        XCTAssertEqual(consumed, data.count)
++        XCTAssertEqual(request.method, "POST")
++        XCTAssertEqual(request.path, "/v1/dictations")
++        XCTAssertEqual(request.query["enhance"], "0")
++        XCTAssertEqual(request.header("authorization"), "Bearer abc")
++        XCTAssertEqual(request.header("Content-Type"), "audio/wav")
++        XCTAssertEqual(request.body, body)
++    }
++
++    func testWaitsForMissingHeaderTerminatorAndBodyBytes() {
++        XCTAssertEqual(
++            LocalAPIHTTPParser.parse(raw("GET /v1/health HTTP/1.1\nHost: x\n"), maxBodyBytes: 10),
++            .incomplete
++        )
++        let partialBody = raw("POST /v1/dictations HTTP/1.1\nContent-Length: 4\n\n", body: Data([1, 2]))
++        XCTAssertEqual(LocalAPIHTTPParser.parse(partialBody, maxBodyBytes: 10), .incomplete)
++    }
++
++    func testRequestWithoutBodyIsCompleteAtHeaderEnd() throws {
++        guard case let .complete(request, _) = LocalAPIHTTPParser.parse(
++            raw("GET /v1/health HTTP/1.1\nHost: x\n\n"),
++            maxBodyBytes: 10
++        ) else {
++            return XCTFail("Expected a complete request")
++        }
++        XCTAssertEqual(request.method, "GET")
++        XCTAssertTrue(request.body.isEmpty)
++    }
++
++    func testRejectsOversizedBodyBeforeReadingIt() {
++        let data = raw("POST /v1/dictations HTTP/1.1\nContent-Length: 11\n\n")
++        XCTAssertEqual(LocalAPIHTTPParser.parse(data, maxBodyBytes: 10), .failure(413))
++    }
++
++    func testRejectsChunkedBodiesAndMalformedRequestLines() {
++        XCTAssertEqual(
++            LocalAPIHTTPParser.parse(raw("POST /v1/dictations HTTP/1.1\nTransfer-Encoding: chunked\n\n"), maxBodyBytes: 10),
++            .failure(411)
++        )
++        XCTAssertEqual(LocalAPIHTTPParser.parse(raw("NONSENSE\n\n"), maxBodyBytes: 10), .failure(400))
++        XCTAssertEqual(
++            LocalAPIHTTPParser.parse(raw("POST /x HTTP/1.1\nContent-Length: -3\n\n"), maxBodyBytes: 10),
++            .failure(400)
++        )
++    }
++
++    func testRejectsHeadersThatNeverEnd() {
++        let data = Data(("GET / HTTP/1.1\r\nX: " + String(repeating: "a", count: 20_000)).utf8)
++        XCTAssertEqual(LocalAPIHTTPParser.parse(data, maxBodyBytes: 10), .failure(431))
++    }
++
++    func testSerializesJSONResponse() throws {
++        let response = LocalAPIHTTPResponse.json(status: 401, ["error": "bad token"])
++        let text = String(decoding: response.serialized(), as: UTF8.self)
++        XCTAssertTrue(text.hasPrefix("HTTP/1.1 401 Unauthorized\r\n"))
++        XCTAssertTrue(text.contains("Content-Type: application/json; charset=utf-8\r\n"))
++        XCTAssertTrue(text.contains("Content-Length: 21\r\n"))
++        XCTAssertTrue(text.contains("Connection: close\r\n"))
++        XCTAssertTrue(text.hasSuffix("\r\n\r\n{\"error\":\"bad token\"}"))
++    }
++}
+diff --git a/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift b/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff63199d467b089f40e611e914d53d26743a5394
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
+@@ -0,0 +1,94 @@
++// LocalAPIRequestHandlerTests.swift
++// Provides Local API request handler tests for Voxt test coverage.
++
++import XCTest
++@testable import Voxt
++
++final class LocalAPIRequestHandlerTests: XCTestCase {
++    private static let readyModels: @MainActor @Sendable () -> LocalAPIModelStatus = {
++        LocalAPIModelStatus(transcription: .ready, text: .off)
++    }
++
++    private func request(_ method: String, _ path: String, token: String = "t") -> LocalAPIHTTPRequest {
++        LocalAPIHTTPRequest(method: method, path: path, headers: ["authorization": "Bearer \(token)"])
++    }
++
++    func testHealthAnswersWhileMainActorIsBusy() async throws {
++        let handler = LocalAPIRequestHandler.make(
++            router: LocalAPIRouter(token: "t", maxBodyBytes: 10),
++            version: "9.9",
++            modelStatus: Self.readyModels,
++            dictate: { @MainActor _ in .json(status: 200, ["text": "x"]) }
++        )
++        let mainBusy = Task { @MainActor in Thread.sleep(forTimeInterval: 1.5) }
++        try await Task.sleep(for: .milliseconds(100))
++
++        let started = Date()
++        let response = await Task.detached { await handler(self.request("GET", "/v1/health")) }.value
++        let elapsed = Date().timeIntervalSince(started)
++        await mainBusy.value
++
++        XCTAssertEqual(response.status, 200)
++        XCTAssertLessThan(elapsed, 0.5, "health waited for the main actor")
++        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: Any])
++        XCTAssertEqual(body["ok"] as? Bool, true)
++        XCTAssertEqual(body["version"] as? String, "9.9")
++    }
++
++    func testRejectionsDoNotReachDictation() async {
++        let dictated = expectation(description: "dictate")
++        dictated.isInverted = true
++        let handler = LocalAPIRequestHandler.make(
++            router: LocalAPIRouter(token: "t", maxBodyBytes: 10),
++            version: "1",
++            modelStatus: Self.readyModels,
++            dictate: { @MainActor _ in
++                dictated.fulfill()
++                return .json(status: 200, ["text": "x"])
++            }
++        )
++        let response = await handler(request("POST", "/v1/dictations", token: "wrong"))
++        XCTAssertEqual(response.status, 401)
++        await fulfillment(of: [dictated], timeout: 0.2)
++    }
++
++    func testDictationIsForwarded() async throws {
++        let handler = LocalAPIRequestHandler.make(
++            router: LocalAPIRouter(token: "t", maxBodyBytes: 10),
++            version: "1",
++            modelStatus: Self.readyModels,
++            dictate: { @MainActor request in .json(status: 200, ["ext": request.fileExtension]) }
++        )
++        var dictation = request("POST", "/v1/dictations")
++        dictation.headers["content-type"] = "audio/wav"
++        dictation.body = Data([1])
++        let response = await handler(dictation)
++        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: String])
++        XCTAssertEqual(body["ext"], "wav")
++    }
++
++    func testCapabilitiesDescribeTheAPIAndModelState() async throws {
++        let handler = LocalAPIRequestHandler.make(
++            router: LocalAPIRouter(token: "t", maxBodyBytes: 4_096),
++            version: "2.0",
++            modelStatus: Self.readyModels,
++            dictate: { @MainActor _ in .json(status: 200, ["text": "x"]) }
++        )
++
++        let response = await handler(request("GET", "/v1/capabilities"))
++
++        XCTAssertEqual(response.status, 200)
++        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: Any])
++        let api = try XCTUnwrap(body["api"] as? [String: Int])
++        XCTAssertEqual(api["major"], 1)
++        XCTAssertEqual(api["minor"], 0)
++        XCTAssertEqual(body["app"] as? String, "Voxt")
++        XCTAssertEqual(body["version"] as? String, "2.0")
++        XCTAssertEqual(body["endpoints"] as? [String], ["health", "capabilities", "dictations"])
++        let audio = try XCTUnwrap(body["audio"] as? [String: Any])
++        XCTAssertEqual(audio["maxBodyBytes"] as? Int, 4_096)
++        XCTAssertEqual(audio["contentTypes"] as? [String], LocalAPIRouter.audioExtensions.keys.sorted())
++        let models = try XCTUnwrap(body["models"] as? [String: String])
++        XCTAssertEqual(models, ["transcription": "ready", "text": "off"])
++    }
++}
+diff --git a/Voxt/VoxtTests/LocalAPIRouterTests.swift b/Voxt/VoxtTests/LocalAPIRouterTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e0196f69d0cfb7bc286d446410667de0c976a15
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIRouterTests.swift
+@@ -0,0 +1,78 @@
++// LocalAPIRouterTests.swift
++// Provides Local API routing and authorization tests for Voxt test coverage.
++
++import XCTest
++@testable import Voxt
++
++final class LocalAPIRouterTests: XCTestCase {
++    private let router = LocalAPIRouter(token: "s3cret-token", maxBodyBytes: 1_000)
++
++    private func request(
++        _ method: String,
++        _ path: String,
++        query: [String: String] = [:],
++        token: String? = "s3cret-token",
++        contentType: String? = nil,
++        body: Data = Data()
++    ) -> LocalAPIHTTPRequest {
++        var headers: [String: String] = [:]
++        if let token { headers["authorization"] = "Bearer \(token)" }
++        if let contentType { headers["content-type"] = contentType }
++        return LocalAPIHTTPRequest(method: method, path: path, query: query, headers: headers, body: body)
++    }
++
++    private func status(_ route: LocalAPIRoute) -> Int? {
++        if case let .reject(response) = route { return response.status }
++        return nil
++    }
++
++    func testHealthNeedsValidToken() {
++        XCTAssertEqual(router.route(request("GET", "/v1/health")), .health)
++        XCTAssertEqual(status(router.route(request("GET", "/v1/health", token: nil))), 401)
++        XCTAssertEqual(status(router.route(request("GET", "/v1/health", token: "s3cret-tokeN"))), 401)
++        XCTAssertEqual(status(router.route(request("GET", "/v1/health", token: "s3cret"))), 401)
++    }
++
++    func testEmptyConfiguredTokenRejectsEverything() {
++        let open = LocalAPIRouter(token: "", maxBodyBytes: 1_000)
++        XCTAssertEqual(status(open.route(request("GET", "/v1/health", token: ""))), 401)
++    }
++
++    func testDictationRoutesAudioAndEnhanceFlag() {
++        let audio = Data([1, 2, 3])
++        XCTAssertEqual(
++            router.route(request("POST", "/v1/dictations", contentType: "audio/wav", body: audio)),
++            .dictation(LocalAPIDictationRequest(audio: audio, fileExtension: "wav", enhance: true))
++        )
++        XCTAssertEqual(
++            router.route(request("POST", "/v1/dictations", query: ["enhance": "0"], contentType: "audio/x-m4a; codecs=aac", body: audio)),
++            .dictation(LocalAPIDictationRequest(audio: audio, fileExtension: "m4a", enhance: false))
++        )
++    }
++
++    func testDictationRejectsBadInput() {
++        XCTAssertEqual(status(router.route(request("POST", "/v1/dictations", contentType: "audio/wav"))), 400)
++        XCTAssertEqual(status(router.route(request("POST", "/v1/dictations", contentType: "text/plain", body: Data([1])))), 415)
++        XCTAssertEqual(status(router.route(request("POST", "/v1/dictations", body: Data([1])))), 415)
++        XCTAssertEqual(status(router.route(request("GET", "/v1/dictations"))), 405)
++        XCTAssertEqual(status(router.route(request("GET", "/nope"))), 404)
++    }
++
++    func testUnauthorizedBeatsEverythingElse() {
++        XCTAssertEqual(status(router.route(request("GET", "/nope", token: nil))), 401)
++    }
++
++    func testGeneratedTokensAreLongAndUnique() {
++        let a = LocalAPIRouter.generateToken()
++        let b = LocalAPIRouter.generateToken()
++        XCTAssertGreaterThanOrEqual(a.count, 32)
++        XCTAssertNotEqual(a, b)
++        XCTAssertNil(a.rangeOfCharacter(from: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).inverted))
++    }
++
++    func testCapabilitiesNeedTokenAndGET() {
++        XCTAssertEqual(router.route(request("GET", "/v1/capabilities")), .capabilities)
++        XCTAssertEqual(status(router.route(request("GET", "/v1/capabilities", token: nil))), 401)
++        XCTAssertEqual(status(router.route(request("POST", "/v1/capabilities"))), 405)
++    }
++}
+diff --git a/Voxt/VoxtTests/LocalAPIServerTests.swift b/Voxt/VoxtTests/LocalAPIServerTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa9bbf1c31d6803fc4925127c9beda7fce807d06
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIServerTests.swift
+@@ -0,0 +1,90 @@
++// LocalAPIServerTests.swift
++// Provides Local API loopback server tests for Voxt test coverage.
++
++import XCTest
++@testable import Voxt
++
++final class LocalAPIServerTests: XCTestCase {
++    func testServesRequestsOnLoopbackAndPassesBodyThrough() async throws {
++        let server = LocalAPIServer(port: 0, maxBodyBytes: 5_000_000) { request in
++            LocalAPIHTTPResponse.json(status: 200, [
++                "path": request.path,
++                "bytes": String(request.body.count),
++                "auth": request.header("authorization") ?? ""
++            ])
++        }
++        let port = try await server.start()
++        defer { server.stop() }
++        XCTAssertGreaterThan(port, 0)
++
++        // Bigger than one TCP read, so the connection has to accumulate chunks.
++        let body = Data(repeating: 7, count: 1_200_000)
++        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/dictations")!)
++        request.httpMethod = "POST"
++        request.setValue("Bearer t", forHTTPHeaderField: "Authorization")
++        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
++        request.httpBody = body
++
++        let (data, response) = try await URLSession.shared.data(for: request)
++
++        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
++        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: String])
++        XCTAssertEqual(json["path"], "/v1/dictations")
++        XCTAssertEqual(json["bytes"], "1200000")
++        XCTAssertEqual(json["auth"], "Bearer t")
++    }
++
++    func testOversizedBodyGets413WithoutCallingHandler() async throws {
++        let called = expectation(description: "handler")
++        called.isInverted = true
++        let server = LocalAPIServer(port: 0, maxBodyBytes: 10) { _ in
++            called.fulfill()
++            return LocalAPIHTTPResponse.json(status: 200, ["ok": "1"])
++        }
++        let port = try await server.start()
++        defer { server.stop() }
++
++        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/dictations")!)
++        request.httpMethod = "POST"
++        request.httpBody = Data(repeating: 1, count: 100)
++        let (_, response) = try await URLSession.shared.data(for: request)
++
++        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 413)
++        await fulfillment(of: [called], timeout: 0.3)
++    }
++
++    func testListenerIsNotReachableOnNonLoopbackAddress() async throws {
++        let server = LocalAPIServer(port: 0, maxBodyBytes: 10) { _ in
++            LocalAPIHTTPResponse.json(status: 200, ["ok": "1"])
++        }
++        let port = try await server.start()
++        defer { server.stop() }
++        guard let lanAddress = LocalAPIServerTests.firstNonLoopbackIPv4() else {
++            throw XCTSkip("No non-loopback IPv4 address on this machine")
++        }
++
++        var request = URLRequest(url: URL(string: "http://\(lanAddress):\(port)/v1/health")!)
++        request.timeoutInterval = 2
++        do {
++            _ = try await URLSession.shared.data(for: request)
++            XCTFail("Server answered on \(lanAddress); it must bind to loopback only")
++        } catch {
++            // Expected: connection refused.
++        }
++    }
++
++    private static func firstNonLoopbackIPv4() -> String? {
++        var pointer: UnsafeMutablePointer<ifaddrs>?
++        guard getifaddrs(&pointer) == 0, let first = pointer else { return nil }
++        defer { freeifaddrs(pointer) }
++        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
++            guard let address = entry.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET),
++                  (entry.pointee.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 else { continue }
++            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
++            if getnameinfo(address, socklen_t(address.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
++                return String(cString: host)
++            }
++        }
++        return nil
++    }
++}
+diff --git a/Voxt/VoxtTests/LocalAPISettingsTests.swift b/Voxt/VoxtTests/LocalAPISettingsTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..74de872e972255f09f0b17c266850a56cabedb87
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPISettingsTests.swift
+@@ -0,0 +1,69 @@
++// LocalAPISettingsTests.swift
++// Provides Local API settings tests for Voxt test coverage.
++
++import XCTest
++@testable import Voxt
++
++final class LocalAPISettingsTests: XCTestCase {
++    private func withEphemeralDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
++        let suiteName = "LocalAPISettingsTests.\(UUID().uuidString)"
++        guard let defaults = UserDefaults(suiteName: suiteName) else {
++            return XCTFail("Expected ephemeral UserDefaults suite")
++        }
++        defaults.removePersistentDomain(forName: suiteName)
++        defer { defaults.removePersistentDomain(forName: suiteName) }
++        try body(defaults)
++    }
++
++    func testDisabledAndDefaultPortWhenUnset() {
++        withEphemeralDefaults { defaults in
++            XCTAssertFalse(LocalAPISettings.isEnabled(defaults: defaults))
++            XCTAssertEqual(LocalAPISettings.port(defaults: defaults), LocalAPISettings.defaultPort)
++        }
++    }
++
++    func testOutOfRangePortFallsBackToDefault() {
++        withEphemeralDefaults { defaults in
++            defaults.set(80, forKey: AppPreferenceKey.localAPIServerPort)
++            XCTAssertEqual(LocalAPISettings.port(defaults: defaults), LocalAPISettings.defaultPort)
++            defaults.set(65535, forKey: AppPreferenceKey.localAPIServerPort)
++            XCTAssertEqual(LocalAPISettings.port(defaults: defaults), LocalAPISettings.defaultPort)
++            defaults.set(52000, forKey: AppPreferenceKey.localAPIServerPort)
++            XCTAssertEqual(LocalAPISettings.port(defaults: defaults), 52000)
++        }
++    }
++
++    func testTokenIsStableAcrossReadsWhenKeychainWritesFail() {
++        VoxtSecureStorage.clearAllForTesting()
++        LocalAPISettings.resetUnsavedTokenForTesting()
++        VoxtSecureStorage.setProtectedWritesFailForTesting(true)
++        defer {
++            VoxtSecureStorage.setProtectedWritesFailForTesting(false)
++            VoxtSecureStorage.clearAllForTesting()
++            LocalAPISettings.resetUnsavedTokenForTesting()
++        }
++
++        let first = LocalAPISettings.token(environment: [:])
++        XCTAssertEqual(LocalAPISettings.token(environment: [:]), first)
++
++        let regenerated = LocalAPISettings.regenerateToken()
++        XCTAssertNotEqual(regenerated, first)
++        XCTAssertEqual(LocalAPISettings.token(environment: [:]), regenerated)
++    }
++
++    func testTokenIsSavedToSecureStorage() {
++        VoxtSecureStorage.clearAllForTesting()
++        LocalAPISettings.resetUnsavedTokenForTesting()
++        defer { VoxtSecureStorage.clearAllForTesting() }
++
++        let token = LocalAPISettings.token(environment: [:])
++        XCTAssertEqual(VoxtSecureStorage.string(for: LocalAPISettings.tokenAccount), token)
++    }
++
++    func testDebugBuildsAcceptTokenFromEnvironment() {
++        XCTAssertEqual(
++            LocalAPISettings.token(environment: ["VOXT_LOCAL_API_TOKEN": "from-env"]),
++            "from-env"
++        )
++    }
++}
+diff --git a/Voxt/docs/LocalAPI.md b/Voxt/docs/LocalAPI.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..90266c4c033f41837c50c4fd07631e50a5957668
+--- /dev/null
++++ b/Voxt/docs/LocalAPI.md
+@@ -0,0 +1,65 @@
++# Local API
++
++Send recorded audio to Voxt from a script, a shortcut or another app, and get back the text Voxt would have typed: the same transcription model, enhancement prompt and dictionary you chose in Settings. Nothing is pasted on the Mac.
++
++## Try it
++
++1. Open **Settings → General → Local API** and turn on **Allow other apps to dictate through Voxt**.
++2. Click **Copy** next to **Access token**.
++3. Send a recording:
++
++```sh
++curl -H "Authorization: Bearer $VOXT_TOKEN" -H "Content-Type: audio/wav" \
++  --data-binary @recording.wav http://127.0.0.1:47910/v1/dictations
++```
++
++```json
++{"id":"5214EBF0-…","text":"Please send Alice fifty dollars by Friday.","rawText":"Please send Alice fifty dollars by Friday.","enhanced":false,"asrMs":531,"enhanceMs":0}
++```
++
++`text` is the result after your enhancement prompt and dictionary; `rawText` is the transcript before them. This example used Qwen3-ASR 0.6B with enhancement off. The result is also saved to History with the source **Local API**.
++
++## Where it listens
++
++Voxt binds `127.0.0.1` only, on port 47910 by default (change it in the same card). Other computers and phones cannot connect directly. To use it from another device, put your own tunnel in front of it, for example `tailscale serve --https=47911 http://127.0.0.1:47910`. Use a different public port: macOS refuses Voxt's bind when the tunnel already holds the same port.
++
++Every request needs `Authorization: Bearer <token>`. **Regenerate** issues a new token and disconnects existing clients.
++
++## Endpoints
++
++| Request | Response |
++| --- | --- |
++| `GET /v1/health` | `{"ok": true, "app": "Voxt", "version": "…"}` |
++| `GET /v1/capabilities` | API version, endpoints, accepted audio types, size limit, and whether the selected transcription and text models are ready |
++| `POST /v1/dictations` | Body: audio bytes. `Content-Type`: `audio/wav`, `audio/x-m4a`, `audio/mp4`, `audio/aac`, `audio/mpeg` or `audio/x-caf`. Add `?enhance=0` to skip the text model. Returns `id`, `text`, `rawText`, `enhanced`, `asrMs`, `enhanceMs` |
++
++`capabilities` example:
++
++```json
++{"api":{"major":1,"minor":0},"app":"Voxt","version":"1.15.0",
++ "endpoints":["health","capabilities","dictations"],
++ "audio":{"contentTypes":["audio/aac","audio/m4a","audio/mp4","audio/mpeg","audio/wav","audio/wave","audio/x-caf","audio/x-m4a","audio/x-wav"],"maxBodyBytes":26214400},
++ "models":{"transcription":"ready","text":"off"}}
++```
++
++Model states are `ready`, `missing` (selected but not downloaded or not configured), `off` (no text model) and `unsupported` (Apple Speech cannot transcribe recorded files).
++
++`/v1` only gains fields and endpoints. Clients should ignore fields they do not know. A breaking change would use `/v2`.
++
++## Errors
++
++Errors return `{"error": "…"}`.
++
++| Status | When |
++| --- | --- |
++| 400 | Empty body or audio that cannot be read |
++| 401 | Missing or wrong token |
++| 404 / 405 | Unknown path or wrong method |
++| 411 | Chunked request body; send `Content-Length` |
++| 413 | Body larger than 25 MB |
++| 415 | Unsupported audio type |
++| 422 | No speech detected |
++| 503 | Voxt is recording or in a meeting, or another API dictation is still running |
++| 500 | The selected model failed, for example a remote provider could not be reached |
++
++If the text model fails, the request still succeeds with the raw transcript and `"enhanced": false`.
+diff --git a/Voxt/docs/index.md b/Voxt/docs/index.md
+index a328d8067b75d484acbb25c9f04fe16d8a6e3ff3..c7a2812636d4e15fd2fe2c99d56d2c8e2edfee83 100644
+--- a/Voxt/docs/index.md
++++ b/Voxt/docs/index.md
+@@ -7,6 +7,7 @@
+ - Prompts: [English](Prompt.md) / [中文](Prompt.zh-CN.md)
+ - Rewrite: [English](Rewrite.md) / [中文](Rewrite.zh-CN.md)
+ - Meetings: [English](Meeting.md) / [中文](Meeting.zh-CN.md)
++- [Local API](LocalAPI.md): dictate through Voxt from scripts and other apps
+ - [六步引导](OnboardingGuide.zh-CN.md) / [快捷键规则](HotkeyRules.zh-CN.md)
+ 
+ ## 开发与维护 / Development

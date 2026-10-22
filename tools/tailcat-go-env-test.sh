@@ -21,6 +21,10 @@ if [[ "$toolchain" == "local" || "$toolchain" == "auto" || "$toolchain" == "$FAK
   use_version="$FAKE_LOCAL_VERSION"
   use_root="$FAKE_LOCAL_GOROOT"
 else
+  if [[ "${FAKE_DOWNLOAD_FAILS:-}" == 1 ]]; then
+    echo "go: download ${toolchain} for darwin/arm64: toolchain not available" >&2
+    exit 1
+  fi
   use_version="$FAKE_SWITCHED_VERSION"
   use_root="$FAKE_SWITCHED_GOROOT"
 fi
@@ -73,5 +77,22 @@ if [[ "$GO_BIN" != "$downloaded/bin/go" ]]; then
   echo "downloaded toolchain was not used: $GO_BIN" >&2
   exit 1
 fi
+
+# The build scripts source this under set -e; without go on PATH they must still say why.
+missing="$(PATH=/usr/bin:/bin /bin/bash -c 'set -euo pipefail; source "$1"; tailcat_prepare_go "$2"' _ \
+  "$root/tools/tailcat-go-env.sh" "$module" 2>&1 || true)"
+if [[ "$missing" != *"system go was not found on PATH"* ]]; then
+  echo "no message when go is missing under set -e: '$missing'" >&2
+  exit 1
+fi
+
+# Without network the go.mod toolchain cannot be downloaded: say what to install.
+export FAKE_LOCAL_VERSION="go1.26.3" FAKE_LOCAL_TOOLCHAIN="go1.26.3" FAKE_DOWNLOAD_FAILS=1
+offline="$(tailcat_prepare_go "$module" 2>&1 || true)"
+if [[ "$offline" != *"install Go 1.27.1 or later"* ]]; then
+  echo "no install hint when the toolchain download fails: '$offline'" >&2
+  exit 1
+fi
+unset FAKE_DOWNLOAD_FAILS
 
 echo "system toolchain reuse ready"

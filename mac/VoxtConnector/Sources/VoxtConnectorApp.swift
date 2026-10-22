@@ -68,7 +68,7 @@ private final class SessionPreferences: ConnectorPreferences, @unchecked Sendabl
     func applicationWillFinishLaunching(_ notification: Notification) { dock.applyAtLaunch() }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        Logger(subsystem: "com.voxtmobile.connector", category: "window").notice("app became active")
+        Logger(subsystem: ConnectorIdentity.bundleIdentifier, category: "window").notice("app became active")
     }
 
     /// The Settings window, made once at launch: SwiftUI's openWindow would build it on the click path,
@@ -117,7 +117,7 @@ private struct ConnectorMenuLabel: View {
                 // Only with VOXT_CONNECTOR_TEST_HOOKS=1: on-screen tests drive the same handlers as
                 // the menu item, the Show in Dock toggle, the Dock icon and a phone on the same Wi-Fi.
                 delegate.testHooks = ConnectorTestHooks.install { [model, dock, delegate] command in
-                    Logger(subsystem: "com.voxtmobile.connector", category: "window").notice("test hook: \(command.rawValue, privacy: .public)")
+                    Logger(subsystem: ConnectorIdentity.bundleIdentifier, category: "window").notice("test hook: \(command.rawValue, privacy: .public)")
                     switch command {
                     case .openSettingsFromMenu: dock.showSettings()
                     case .showInDockOn: dock.showsInDock = true
@@ -165,7 +165,7 @@ private struct ConnectorSettings: View {
                 .accessibilityIdentifier("connectorStatus")
             Form {
                 Section("Voxt on this Mac") {
-                    Text("Turn on Remote Input in Voxt Settings, then click Connect and choose Allow in Voxt. To connect by hand, enter the port and Access token from Voxt Settings.")
+                    Text("In Voxt Settings › General › Local API, turn on “Allow other apps to dictate through Voxt”. Then click Connect and choose Allow in Voxt. To connect by hand, enter the port and Access token shown there.")
                         .foregroundStyle(.secondary)
                     TextField("Port", text: $model.port)
                         .accessibilityIdentifier("connectorPort")
@@ -224,7 +224,7 @@ private struct ConnectorSettings: View {
             }
             .formStyle(.grouped)
             .onAppear {
-                Logger(subsystem: "com.voxtmobile.connector", category: "window").notice("settings window appeared")
+                Logger(subsystem: ConnectorIdentity.bundleIdentifier, category: "window").notice("settings window appeared")
             }
             .task { await model.refreshLoginItem() }
             .sheet(item: Binding(get: { model.phoneRequest },

@@ -26,6 +26,6 @@ import Testing
         center.post(name: ConnectorTestHooks.notificationName(command), object: nil)
     }
     #expect(received.commands == ConnectorTestCommand.allCases)
-    #expect(ConnectorTestHooks.notificationName(.showInDockOff).rawValue == "com.voxtmobile.connector.test.showInDockOff")
+    #expect(ConnectorTestHooks.notificationName(.showInDockOff).rawValue == "com.voxt.VoxtConnector.test.showInDockOff")
     _ = hooks
 }

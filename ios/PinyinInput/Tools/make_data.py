@@ -11,6 +11,7 @@ Usage: python3 -I make_data.py [WORDS [TWO_CHAR [OUT]]]
   OUT: folder under out/. DROP (optional): word<TAB>reading lines to leave out,
   from find_redundant.py.
 """
+
 import hashlib
 import json
 import math
@@ -45,7 +46,11 @@ def parse(lines):
         if len(parts) < 3 or not parts[2].strip().isdigit():
             continue
         word, syllables = parts[0], toneless(parts[1])
-        if not HAN.match(word) or len(syllables) != len(word) or len(word) > MAX_SYLLABLES:
+        if (
+            not HAN.match(word)
+            or len(syllables) != len(word)
+            or len(word) > MAX_SYLLABLES
+        ):
             continue
         if not all(SYLLABLE.match(s) for s in syllables):
             continue
@@ -65,7 +70,7 @@ def prune(entries, count, two_char=None):
     if two_char is None:
         return dict(ranked[:count])
     pairs = [item for item in ranked if len(item[0][0]) == 2][:two_char]
-    longer = [item for item in ranked if len(item[0][0]) != 2][:count - len(pairs)]
+    longer = [item for item in ranked if len(item[0][0]) != 2][: count - len(pairs)]
     return dict(pairs + longer)
 
 
@@ -76,7 +81,13 @@ def render(entries):
         score = math.log10(max(weight, 1) / total)
         rows.append(("-".join(syllables), word, score))
     rows.sort(key=lambda row: ((row[0] + " ").encode(), -row[2], row[1]))
-    return "\n".join([HEADER] + [f"{reading} {word} {score:.6f}" for reading, word, score in rows]) + "\n"
+    return (
+        "\n".join(
+            [HEADER]
+            + [f"{reading} {word} {score:.6f}" for reading, word, score in rows]
+        )
+        + "\n"
+    )
 
 
 def sha256(path):
@@ -86,7 +97,11 @@ def sha256(path):
 def main():
     here = Path(__file__).resolve().parent
     words = int(sys.argv[1]) if len(sys.argv) > 1 else 250_000
-    two_char = (int(sys.argv[2]) if sys.argv[2] != "-" else None) if len(sys.argv) > 2 else 162_000
+    two_char = (
+        (int(sys.argv[2]) if sys.argv[2] != "-" else None)
+        if len(sys.argv) > 2
+        else 162_000
+    )
     source = here / "source"
     zi = merge(parse((source / "zi.dict.yaml").open(encoding="utf-8")))
     jichu = merge(parse((source / "jichu.dict.yaml").open(encoding="utf-8")))
@@ -104,7 +119,10 @@ def main():
     manifest = {
         "source": "https://github.com/amzxyz/rime-wanxiang (CC-BY-4.0), dicts/zi.dict.yaml + dicts/jichu.dict.yaml, modified",
         "revision": (source / "COMMIT").read_text().strip(),
-        "inputs": {name: sha256(source / name) for name in ("zi.dict.yaml", "jichu.dict.yaml", "LICENSE")},
+        "inputs": {
+            name: sha256(source / name)
+            for name in ("zi.dict.yaml", "jichu.dict.yaml", "LICENSE")
+        },
         "generator_sha256": sha256(Path(__file__)),
         "characters": len(zi),
         "words": len(jichu),
@@ -114,7 +132,9 @@ def main():
         "bytes": data.stat().st_size,
         "output_sha256": sha256(data),
     }
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+    (out / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
+    )
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
 
 

@@ -1,12 +1,15 @@
 name: VoxtMobile
+# Japanese, pinyin and Zhuyin layouts with their dictionaries; drop this line to build without them.
+include:
+  - InputMethods.yml
 options:
-  bundleIdPrefix: io.jingtao.voxtmobile
+  bundleIdPrefix: com.voxt.VoxtMobile
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
 configFiles:
-  Debug: Config/Signing.xcconfig
-  Release: Config/Signing.xcconfig
+  Debug: Config/Signing.shared.xcconfig
+  Release: Config/Signing.shared.xcconfig
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -18,18 +21,12 @@ packages:
     path: VoxtTailcat
   VoxtMobileKit:
     path: VoxtMobileKit
-  JapaneseInput:
-    path: JapaneseInput
-  ZhuyinInput:
-    path: ZhuyinInput
   TypingInput:
     path: TypingInput
   KoreanInput:
     path: KoreanInput
   SpanishInput:
     path: SpanishInput
-  PinyinInput:
-    path: PinyinInput
 targets:
   VoxtMobile:
     type: application
@@ -51,6 +48,9 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         VoxtAppGroup: $(VOXT_APP_GROUP)
+        VoxtInputMethods: $(VOXT_INPUT_METHODS)
+        VoxtKeychainServicePrefix: $(VOXT_KEYCHAIN_SERVICE_PREFIX)
+        VoxtSourceURL: $(VOXT_SOURCE_URL)
         VoxtSourceRevision: $(VOXT_SOURCE_REVISION)
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
@@ -76,15 +76,12 @@ targets:
       - path: App/CompositionSession.swift
     dependencies:
       - package: VoxtMobileKit
-      - package: JapaneseInput
-      - package: ZhuyinInput
       - package: TypingInput
         product: TypingInput
       - package: TypingInput
         product: TypingHost
       - package: KoreanInput
       - package: SpanishInput
-      - package: PinyinInput
     entitlements:
       path: Keyboard/VoxtKeyboard.entitlements
       properties:
@@ -96,6 +93,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         VoxtAppGroup: $(VOXT_APP_GROUP)
+        VoxtInputMethods: $(VOXT_INPUT_METHODS)
         VoxtSourceRevision: $(VOXT_SOURCE_REVISION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.keyboard-service

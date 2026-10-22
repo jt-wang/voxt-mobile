@@ -1,0 +1,3431 @@
+diff --git a/Voxt/Voxt/App/EnhancementPromptFlow.swift b/Voxt/Voxt/App/EnhancementPromptFlow.swift
+index f9741a21f76a3085d15e28726bec599878d9b0ad..a1797f24685489ef3e9f89cfcefb70e862140328 100644
+--- a/Voxt/Voxt/App/EnhancementPromptFlow.swift
++++ b/Voxt/Voxt/App/EnhancementPromptFlow.swift
+@@ -43,7 +43,8 @@ extension AppDelegate {
+     func resolvedEnhancementPrompt(
+         rawTranscription: String,
+         glossarySelectionPolicy: DictionaryGlossarySelectionPolicy? = nil,
+-        usesAppBranch: Bool = true
++        usesAppBranch: Bool = true,
++        instructionOverride: String? = nil
+     ) -> EnhancementPromptResolution {
+         let groups = loadAppBranchGroups()
+         let urlsByID = loadAppBranchURLsByID()
+@@ -62,12 +63,15 @@ extension AppDelegate {
+ 
+         let resolution = EnhancementPromptResolver.resolve(
+             .init(
+-                globalPrompt: resolvedGlobalEnhancementPrompt(),
++                globalPrompt: instructionOverride ?? resolvedGlobalEnhancementPrompt(),
+                 rawTranscription: rawTranscription,
+                 userMainLanguagePromptValue: userMainLanguagePromptValue,
+                 userOtherLanguagesPromptValue: userOtherMainLanguagesPromptValue,
+                 dictionaryGlossary: glossary,
+                 appEnhancementEnabled: appEnhancementEnabled && usesAppBranch,
++                // A compose instruction speaks for the client's request; the Mac's language
++                // preferences must not leak into it.
++                appendsLanguagePreservationRules: instructionOverride == nil,
+                 groups: groups,
+                 urlsByID: urlsByID,
+                 frontmostBundleID: frontmostBundleID,
+diff --git a/Voxt/Voxt/App/LocalAPIFlow.swift b/Voxt/Voxt/App/LocalAPIFlow.swift
+index b19e4f591e8af84180b075544463a3fefd5de8db..164a884d65fcaf29278a302f3f741b4eed445297 100644
+--- a/Voxt/Voxt/App/LocalAPIFlow.swift
++++ b/Voxt/Voxt/App/LocalAPIFlow.swift
+@@ -42,6 +42,10 @@ extension AppDelegate {
+                 self?.recordLocalAPIHistory(outcome)
+             }
+         )
++        pipeline.composeHandler = { [weak self] text, options in
++            guard let self else { throw CancellationError() }
++            return try await self.composeLocalAPITranscript(text, options: options)
++        }
+         let router = LocalAPIRouter(token: LocalAPISettings.token(), maxBodyBytes: LocalAPISettings.maxBodyBytes)
+         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+         let handler = LocalAPIRequestHandler.make(
+@@ -52,6 +56,9 @@ extension AppDelegate {
+             },
+             dictate: { dictation in
+                 await pipeline.run(dictation)
++            },
++            compose: { composeRequest in
++                await pipeline.runCompose(composeRequest)
+             }
+         )
+         let server = LocalAPIServer(port: UInt16(port), maxBodyBytes: LocalAPISettings.maxBodyBytes, handler: handler)
+@@ -112,6 +119,39 @@ extension AppDelegate {
+         return try await enhanceTextForCurrentMode(text, sessionID: nil, usesAppBranch: false)
+     }
+ 
++    /// The selected text model as the compose prompt sees it: whether it can run at all.
++    func localAPITextModel() -> LocalAPIComposePrompt.TextModel {
++        switch enhancementMode {
++        case .off:
++            return .disabled
++        case .customLLM:
++            return .customLLM(ready: resolvedTranscriptionEnhancementLocalRepo().map { repo in
++                customLLMManager.canAttemptInference(repo: repo)
++            } ?? false)
++        case .remoteLLM:
++            let context = resolvedRemoteLLMContext(forTranslation: false)
++            return .remoteLLM(configured: RemoteModelConfigurationStore.isStoredLLMConfigurationConfigured(
++                provider: context.provider,
++                stored: remoteLLMConfigurations
++            ))
++        case .appleIntelligence:
++            return .appleIntelligence
++        }
++    }
++
++    /// Translate, edit, write and dictate with options reuse the selected text model with a
++    /// mode-specific prompt for this one request; the user's settings are read, never changed.
++    /// Unlike a plain dictation this path fails closed: without a working model it throws
++    /// instead of returning raw speech as if the operation had succeeded.
++    private func composeLocalAPITranscript(_ text: String, options: LocalAPIComposeOptions) async throws -> String {
++        if let reason = LocalAPIComposePrompt.unavailabilityReason(for: localAPITextModel()) {
++            throw LocalAPIError(message: AppLocalization.localizedString(reason))
++        }
++        return try await LocalAPIComposePrompt.compose(rawTranscription: text, options: options) { instruction in
++            try await self.composeTextStrictly(text, instruction: instruction)
++        }
++    }
++
+     private func finalizeLocalAPIText(_ text: String) -> LocalAPIFinalText {
+         let context = Self.preparedDeliveryContext(
+             originalText: text,
+@@ -183,8 +223,3 @@ enum LocalAPIServerStatus: Equatable {
+     case listening(port: Int)
+     case failed(String)
+ }
+-
+-struct LocalAPIError: LocalizedError {
+-    var message: String
+-    var errorDescription: String? { message }
+-}
+diff --git a/Voxt/Voxt/App/TranscriptionFlow.swift b/Voxt/Voxt/App/TranscriptionFlow.swift
+index f5dd5ebff8e05568f059f900f0f0e866526453d5..0fd953c1938e3651c3a6f9e08652e68df5ae2cc2 100644
+--- a/Voxt/Voxt/App/TranscriptionFlow.swift
++++ b/Voxt/Voxt/App/TranscriptionFlow.swift
+@@ -211,4 +211,58 @@ extension AppDelegate {
+         }
+         return guarded.text
+     }
++
++    /// The compose execution path of the Local API: translate, edit, write, and dictations
++    /// that carry options. Unlike enhanceTextForCurrentMode it never falls back to the raw
++    /// text: every unavailable exit throws, and the transcription truncation guard is not
++    /// applied because a much shorter result is a valid outcome of these operations.
++    func composeTextStrictly(_ text: String, instruction: String) async throws -> String {
++        guard let provider = resolvedTranscriptionEnhancementProvider() else {
++            throw LocalAPIError(message: AppLocalization.localizedString(
++                "No text model is available. Choose one in Voxt Settings > Transcription."
++            ))
++        }
++
++        let promptResolution = resolvedEnhancementPrompt(
++            rawTranscription: text,
++            usesAppBranch: false,
++            instructionOverride: instruction
++        )
++        if promptResolution.delivery == .skipEnhancement {
++            throw LocalAPIError(message: AppLocalization.localizedString(
++                "The selected text model is configured to skip enhancement."
++            ))
++        }
++
++        if enhancementMode == .remoteLLM {
++            let context = resolvedRemoteLLMContext(forTranslation: false)
++            guard RemoteModelConfigurationStore.isStoredLLMConfigurationConfigured(
++                provider: context.provider,
++                stored: remoteLLMConfigurations
++            ) else {
++                throw LocalAPIError(message: AppLocalization.localizedString(
++                    "No text model is available. Choose one in Voxt Settings > Transcription."
++                ))
++            }
++        }
++
++        guard let plan = buildEnhancementExecutionPlan(
++            rawText: text,
++            promptResolution: promptResolution,
++            providerOverride: provider,
++            executionStrategy: TaskLLMStrategyResolver.resolve(
++                taskKind: .transcriptionEnhancement,
++                rawText: text,
++                promptCharacterCount: promptResolution.content.count
++                    + (promptResolution.dictionaryGlossary?.count ?? 0),
++                baseGlossarySelectionPolicy: DictionaryGlossaryPurpose.enhancement.selectionPolicy,
++                capabilities: llmProviderModelCapabilities(for: provider)
++            )
++        ) else {
++            throw LocalAPIError(message: AppLocalization.localizedString(
++                "The selected text model cannot run this operation."
++            ))
++        }
++        return try await executeLLMExecutionPlan(plan)
++    }
+ }
+diff --git a/Voxt/Voxt/Core/EnhancementPromptResolver.swift b/Voxt/Voxt/Core/EnhancementPromptResolver.swift
+index 47dbeba27b67cefc348aacb52c20bfb1a6628a32..6413a3669b35e69e100f8331b8ea322c27398f0d 100644
+--- a/Voxt/Voxt/Core/EnhancementPromptResolver.swift
++++ b/Voxt/Voxt/Core/EnhancementPromptResolver.swift
+@@ -40,6 +40,7 @@ struct EnhancementPromptResolver {
+         let userOtherLanguagesPromptValue: String
+         let dictionaryGlossary: String?
+         let appEnhancementEnabled: Bool
++        var appendsLanguagePreservationRules = true
+         let groups: [AppBranchGroup]
+         let urlsByID: [UUID: String]
+         let frontmostBundleID: String?
+@@ -68,7 +69,8 @@ struct EnhancementPromptResolver {
+                     template: fallbackPrompt,
+                     rawTranscription: input.rawTranscription,
+                     userMainLanguagePromptValue: input.userMainLanguagePromptValue,
+-                    userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue
++                    userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue,
++                    appendsLanguagePreservationRules: input.appendsLanguagePreservationRules
+                 ),
+                 delivery: fallbackDelivery,
+                 promptContext: PromptContext(
+@@ -105,7 +107,8 @@ struct EnhancementPromptResolver {
+                         template: match.prompt,
+                         rawTranscription: input.rawTranscription,
+                         userMainLanguagePromptValue: input.userMainLanguagePromptValue,
+-                        userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue
++                        userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue,
++                        appendsLanguagePreservationRules: input.appendsLanguagePreservationRules
+                     ),
+                     delivery: .systemPrompt,
+                     promptContext: PromptContext(
+@@ -128,7 +131,8 @@ struct EnhancementPromptResolver {
+                         template: fallbackPrompt,
+                         rawTranscription: input.rawTranscription,
+                         userMainLanguagePromptValue: input.userMainLanguagePromptValue,
+-                        userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue
++                        userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue,
++                        appendsLanguagePreservationRules: input.appendsLanguagePreservationRules
+                     ),
+                     delivery: fallbackDelivery,
+                     promptContext: PromptContext(
+@@ -157,7 +161,8 @@ struct EnhancementPromptResolver {
+                         template: prompt,
+                         rawTranscription: input.rawTranscription,
+                         userMainLanguagePromptValue: input.userMainLanguagePromptValue,
+-                        userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue
++                        userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue,
++                        appendsLanguagePreservationRules: input.appendsLanguagePreservationRules
+                     ),
+                     delivery: .systemPrompt,
+                     promptContext: PromptContext(
+@@ -175,7 +180,8 @@ struct EnhancementPromptResolver {
+                     template: fallbackPrompt,
+                     rawTranscription: input.rawTranscription,
+                     userMainLanguagePromptValue: input.userMainLanguagePromptValue,
+-                    userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue
++                    userOtherLanguagesPromptValue: input.userOtherLanguagesPromptValue,
++                    appendsLanguagePreservationRules: input.appendsLanguagePreservationRules
+                 ),
+                 delivery: fallbackDelivery,
+                 promptContext: PromptContext(
+@@ -204,19 +210,20 @@ struct EnhancementPromptResolver {
+         template: String,
+         rawTranscription: String,
+         userMainLanguagePromptValue: String,
+-        userOtherLanguagesPromptValue: String
++        userOtherLanguagesPromptValue: String,
++        appendsLanguagePreservationRules: Bool
+     ) -> String {
+         let resolved = template
+             .replacingOccurrences(of: rawTranscriptionTemplateVariable, with: rawTranscription)
+             .replacingOccurrences(of: userMainLanguageTemplateVariable, with: userMainLanguagePromptValue)
+-        return [
+-            resolved,
+-            enhancementLanguagePreservationRules(
++        let languageRules: String? = appendsLanguagePreservationRules
++            ? enhancementLanguagePreservationRules(
+                 userMainLanguagePromptValue: userMainLanguagePromptValue,
+                 userOtherLanguagesPromptValue: userOtherLanguagesPromptValue
+             )
+-        ]
+-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
++            : nil
++        return [resolved, languageRules]
++            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+             .filter { !$0.isEmpty }
+             .joined(separator: "\n\n")
+     }
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIComposeOptions.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIComposeOptions.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c603fb6dbac8963b35bbe10d92b5fb12c28718f
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIComposeOptions.swift
+@@ -0,0 +1,241 @@
++// LocalAPIComposeOptions.swift
++// Provides the validated options of a Local API compose request. The rules mirror the
++// phone's CompositionOptions exactly so a request the keyboard allowed is always accepted
++// here, and nothing else is.
++
++import Foundation
++
++nonisolated enum LocalAPIComposeMode: String, Codable, Equatable, Sendable, CaseIterable {
++    case dictate, translate, edit, write
++}
++
++nonisolated enum LocalAPIComposeStyle: String, Codable, Equatable, Sendable, CaseIterable {
++    case automatic, formal, casual, concise
++}
++
++/// One phone-kept wording pair. It exists only on the compose request. Nothing here is stored.
++nonisolated struct LocalAPIStyleExample: Equatable, Sendable {
++    var before: String
++    var after: String
++
++    static func digitSequences(in text: String) -> [String] {
++        var sequences: [String] = []
++        var current = ""
++        for character in text {
++            let isDigit = character.unicodeScalars.allSatisfy { $0.value >= 48 && $0.value <= 57 }
++            if isDigit {
++                current.append(character)
++            } else if !current.isEmpty {
++                sequences.append(current)
++                current = ""
++            }
++        }
++        if !current.isEmpty { sequences.append(current) }
++        return sequences
++    }
++}
++
++nonisolated enum LocalAPIComposeDecoding: Error {
++    case styleExamples(String)
++}
++
++nonisolated struct LocalAPIComposeOptions: Equatable, Sendable {
++    static let maximumTargetLanguageCount = 64
++    static let maximumSelectedTextCount = 8_000
++    static let maximumContextCount = 2_000
++    static let maximumVocabularyCount = 200
++    static let maximumVocabularyTermCount = 100
++    static let maximumCustomPromptCount = 4_000
++
++    /// One regional variant per language base; anything else is rejected.
++    static let allowedLanguageVariants: Set<String> = [
++        "en-US", "en-GB", "en-AU", "en-CA",
++        "zh-Hans", "zh-Hant",
++        "es-ES", "es-MX",
++        "fr-FR", "fr-CA",
++        "pt-PT", "pt-BR",
++    ]
++
++    var mode: LocalAPIComposeMode = .dictate
++    var targetLanguage: String?
++    var selectedText: String = ""
++    var contextBefore: String = ""
++    var contextAfter: String = ""
++    var style: LocalAPIComposeStyle = .automatic
++    var vocabulary: [String] = []
++    var languageVariants: [String] = []
++    var styleExamples: [LocalAPIStyleExample] = []
++    /// A paired phone's Developer prompt for this mode. It replaces the built-in instruction
++    /// for this one request; nothing is stored. nil uses the built-in prompt.
++    var customPrompt: String?
++
++    init(
++        mode: LocalAPIComposeMode = .dictate,
++        targetLanguage: String? = nil,
++        selectedText: String = "",
++        contextBefore: String = "",
++        contextAfter: String = "",
++        style: LocalAPIComposeStyle = .automatic,
++        vocabulary: [String] = [],
++        languageVariants: [String] = [],
++        styleExamples: [LocalAPIStyleExample] = []
++    ) {
++        self.mode = mode
++        self.targetLanguage = targetLanguage
++        self.selectedText = selectedText
++        self.contextBefore = contextBefore
++        self.contextAfter = contextAfter
++        self.style = style
++        self.vocabulary = vocabulary
++        self.languageVariants = languageVariants
++        self.styleExamples = styleExamples
++    }
++
++    /// nil when the options satisfy every rule, otherwise the HTTP rejection reason.
++    func validationError() -> String? {
++        if mode == .edit, selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
++            return "Select the text you want to edit first."
++        }
++        if mode == .translate, targetLanguage == nil {
++            return "Choose a translation language first."
++        }
++        if let targetLanguage, !Self.isValidTargetLanguage(targetLanguage) {
++            return "Choose a valid translation language."
++        }
++        if selectedText.count > Self.maximumSelectedTextCount
++            || contextBefore.count > Self.maximumContextCount
++            || contextAfter.count > Self.maximumContextCount {
++            return "Select a shorter passage to work on."
++        }
++        if vocabulary.count > Self.maximumVocabularyCount
++            || !vocabulary.allSatisfy({ term in
++                !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
++                    && term.count <= Self.maximumVocabularyTermCount
++            }) {
++            return "Use at most 200 dictionary entries, each up to 100 characters."
++        }
++        if !languageVariants.allSatisfy({ Self.allowedLanguageVariants.contains($0) }) {
++            return "Choose a supported language variant."
++        }
++        let variantBases = languageVariants.map { variant in
++            variant.split(separator: "-").first.map(String.init) ?? variant
++        }
++        if Set(variantBases).count != variantBases.count {
++            return "Pick at most one variant per language."
++        }
++        if let styleError = Self.styleExampleError(styleExamples) {
++            return styleError
++        }
++        if let customPrompt, customPrompt.count > Self.maximumCustomPromptCount {
++            return "Use a custom prompt of at most 4,000 characters."
++        }
++        return nil
++    }
++
++    /// Semantic limits for pairs that already decoded. Structure errors are thrown earlier.
++    static func styleExampleError(_ examples: [LocalAPIStyleExample]) -> String? {
++        if examples.count > 8 {
++            return "Use at most 8 personal style examples."
++        }
++        var seen: Set<String> = []
++        for example in examples {
++            if example.before.isEmpty || example.after.isEmpty
++                || example.before.count > 120 || example.after.count > 120 {
++                return "A personal style example must be 1 to 120 characters."
++            }
++            if example.before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
++                || example.after.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
++                return "A personal style example must not be blank."
++            }
++            if example.before == example.after {
++                return "The personal style example texts must differ."
++            }
++            if LocalAPIStyleExample.digitSequences(in: example.before)
++                != LocalAPIStyleExample.digitSequences(in: example.after) {
++                return "Personal style examples must keep the same digit sequences."
++            }
++            let identity = example.before + "\u{0}" + example.after
++            if !seen.insert(identity).inserted {
++                return "Personal style examples must not repeat."
++            }
++        }
++        return nil
++    }
++
++    /// A well-formed BCP-47 label whose base subtag is an ISO language. This says nothing
++    /// about which languages the selected models actually support.
++    static func isValidTargetLanguage(_ tag: String) -> Bool {
++        let base = tag.split(separator: "-").first.map(String.init)?.lowercased() ?? ""
++        return tag.count <= maximumTargetLanguageCount
++            && tag.range(of: "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$", options: .regularExpression) != nil
++            && Locale.isoLanguageCodes.contains(base)
++    }
++}
++
++extension LocalAPIComposeOptions: Decodable {
++    enum CodingKeys: String, CodingKey {
++        case mode, targetLanguage, selectedText, contextBefore, contextAfter, style, vocabulary, languageVariants, styleExamples, customPrompt
++    }
++
++    init(from decoder: Decoder) throws {
++        let container = try decoder.container(keyedBy: CodingKeys.self)
++        mode = try container.decodeIfPresent(LocalAPIComposeMode.self, forKey: .mode) ?? .dictate
++        targetLanguage = try container.decodeIfPresent(String.self, forKey: .targetLanguage)
++        selectedText = try container.decodeIfPresent(String.self, forKey: .selectedText) ?? ""
++        contextBefore = try container.decodeIfPresent(String.self, forKey: .contextBefore) ?? ""
++        contextAfter = try container.decodeIfPresent(String.self, forKey: .contextAfter) ?? ""
++        style = try container.decodeIfPresent(LocalAPIComposeStyle.self, forKey: .style) ?? .automatic
++        vocabulary = try container.decodeIfPresent([String].self, forKey: .vocabulary) ?? []
++        languageVariants = try container.decodeIfPresent([String].self, forKey: .languageVariants) ?? []
++        styleExamples = try Self.decodeStyleExamples(from: container)
++        let prompt = try container.decodeIfPresent(String.self, forKey: .customPrompt)?.trimmingCharacters(in: .whitespacesAndNewlines)
++        customPrompt = prompt?.isEmpty == false ? prompt : nil
++    }
++
++    private static func decodeStyleExamples(from container: KeyedDecodingContainer<CodingKeys>) throws -> [LocalAPIStyleExample] {
++        guard container.contains(.styleExamples) else { return [] }
++        if try container.decodeNil(forKey: .styleExamples) {
++            throw LocalAPIComposeDecoding.styleExamples("The personal style request has invalid fields.")
++        }
++        let decoded: [StyleExampleObject]
++        do {
++            decoded = try container.decode([StyleExampleObject].self, forKey: .styleExamples)
++        } catch let error as LocalAPIComposeDecoding {
++            throw error
++        } catch {
++            throw LocalAPIComposeDecoding.styleExamples("The personal style request has invalid fields.")
++        }
++        return decoded.map { LocalAPIStyleExample(before: $0.before, after: $0.after) }
++    }
++}
++
++private struct StyleExampleObject: Decodable {
++    var before: String
++    var after: String
++
++    private struct AnyKey: CodingKey {
++        var stringValue: String
++        var intValue: Int?
++        init?(stringValue: String) { self.stringValue = stringValue }
++        init?(intValue: Int) {
++            self.intValue = intValue
++            self.stringValue = "\(intValue)"
++        }
++    }
++
++    private enum Field: String, CodingKey { case before, after }
++
++    init(from decoder: Decoder) throws {
++        let present = try decoder.container(keyedBy: AnyKey.self)
++        guard Set(present.allKeys.map(\.stringValue)) == ["before", "after"] else {
++            throw LocalAPIComposeDecoding.styleExamples("The personal style request has invalid fields.")
++        }
++        let fields = try decoder.container(keyedBy: Field.self)
++        guard let before = try? fields.decode(String.self, forKey: .before),
++              let after = try? fields.decode(String.self, forKey: .after) else {
++            throw LocalAPIComposeDecoding.styleExamples("The personal style request has invalid fields.")
++        }
++        self.before = before
++        self.after = after
++    }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIComposePrompt.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIComposePrompt.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..6997b6cf11c4f630c2df1ab7437883ea1f1eb7fd
+--- /dev/null
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIComposePrompt.swift
+@@ -0,0 +1,1024 @@
++// LocalAPIComposePrompt.swift
++// Provides the mode-specific instruction that replaces the global transcription prompt for
++// one Local API compose request. The raw speech reaches the model through the same
++// template variable the global prompt uses.
++
++import Foundation
++
++nonisolated enum LocalAPIComposePrompt {
++    static func hanShare(in text: String) -> Double? {
++        let letters = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }
++        guard !letters.isEmpty else { return nil }
++        let hanCount = letters.filter { scalar in
++            switch scalar.value {
++            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0x20000...0x323AF: return true
++            default: return false
++            }
++        }.count
++        return Double(hanCount) / Double(letters.count)
++    }
++
++    static func preservingDictationScript(_ cleanedText: String, rawText: String) -> String {
++        guard let rawShare = hanShare(in: rawText), let cleanedShare = hanShare(in: cleanedText) else {
++            return cleanedText
++        }
++        let changedScript = (rawShare >= 0.5 && cleanedShare <= 0.1)
++            || (rawShare <= 0.1 && cleanedShare >= 0.5)
++        return changedScript ? rawText : cleanedText
++    }
++
++    /// A mixed transcript needs at least two Han characters and four Latin letters.
++    /// Below that, a single initial or symbol is too little evidence for a retry.
++    /// Count loss, not language dominance: a short Chinese span inside English matters.
++    static func losesMixedDictationContent(_ output: String, rawText: String) -> Bool {
++        func counts(_ text: String) -> (han: Int, latinLetters: Int, latinWords: Int) {
++            let han = text.unicodeScalars.filter { scalar in
++                switch scalar.value {
++                case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0x20000...0x323AF: return true
++                default: return false
++                }
++            }.count
++            let regex = try? NSRegularExpression(pattern: #"\p{Latin}+"#)
++            let words = (regex?.matches(in: text, range: NSRange(text.startIndex..., in: text)) ?? []).compactMap { match in
++                Range(match.range, in: text).map { String(text[$0]) }
++            }
++            return (han, words.reduce(0) { $0 + $1.unicodeScalars.count }, words.count)
++        }
++        let source = counts(rawText)
++        guard source.han >= 2, source.latinLetters >= 4 else { return false }
++        let result = counts(output)
++        return Double(result.han) < Double(source.han) * 0.3
++            || Double(result.latinWords) < Double(source.latinWords) * 0.3
++    }
++
++    /// The selected text model as compose needs to see it. Every compose mode consults the
++    /// model; the cases describe whether the currently selected model can run it at all.
++    enum TextModel: Equatable, Sendable {
++        case disabled
++        case customLLM(ready: Bool)
++        case remoteLLM(configured: Bool)
++        case appleIntelligence
++    }
++
++    /// nil when the model can run compose operations, otherwise the failure reason.
++    static func unavailabilityReason(for model: TextModel) -> String? {
++        switch model {
++        case .disabled, .customLLM(ready: false), .remoteLLM(configured: false):
++            "No text model is available. Choose one in Voxt Settings > Transcription."
++        case .customLLM(ready: true), .remoteLLM(configured: true), .appleIntelligence:
++            nil
++        }
++    }
++
++    /// The instruction that replaces the global transcription prompt for one compose
++    /// request. Every mode — dictate included — runs through the selected text model;
++    /// only /v1/dictations keeps the legacy global prompt.
++    /// Stored wording pairs never override an explicit tone or a translation target.
++    static func styleExamplesForPrompt(_ options: LocalAPIComposeOptions) -> [LocalAPIStyleExample] {
++        guard options.style == .automatic, options.mode != .translate else { return [] }
++        return options.styleExamples
++    }
++
++    static func instruction(
++        for options: LocalAPIComposeOptions, rawTranscription: String = "",
++        editRetry: EditRetry? = nil,
++        retryingContextLeak: Bool = false,
++        retryingWritePlaceholder: Bool = false,
++        retryingMixedDictation: Bool = false
++    ) -> String? {
++        let styleExamples = styleExamplesForPrompt(options)
++        let custom = options.customPrompt.map { $0.replacingOccurrences(of: targetLanguageTemplateVariable, with: options.targetLanguage ?? "") }
++        switch options.mode {
++        case .dictate:
++            let usesChinese = (hanShare(in: rawTranscription) ?? 0) >= 0.5
++            var task = custom ?? (retryingMixedDictation
++                ? (usesChinese ? previousChineseDictationInstruction : previousEnglishDictationInstruction)
++                : (usesChinese ? chineseDictationInstruction : englishDictationInstruction))
++            if retryingContextLeak {
++                task += usesChinese
++                    ? "\n\n第一次输出重复了输入框里已有的文字。只输出这次口述整理后的内容，不要重复光标前后的文字。"
++                    : "\n\nThe first attempt repeated text that is already in the field. Output only the cleaned transcript of this speech; never repeat the text before or after the cursor."
++            }
++            // No cursor context for plain cleanup: with it, Qwen3.5-4B copied the earlier text
++            // into 4 of 6 outputs; without it, 6 of 6 were clean in one call.
++            return body(
++                task: task,
++                selection: nil,
++                context: nil,
++                style: options.style,
++                vocabulary: options.vocabulary,
++                languageVariants: options.languageVariants,
++                styleExamples: styleExamples,
++                transcriptPrefix: usesChinese ? "口述转写：" : "Speech transcript: ",
++                outputCue: !retryingMixedDictation && !usesChinese ? "Output:" : nil
++            )
++        case .translate:
++            let target = options.targetLanguage ?? ""
++            var task = custom ?? translateTask(target: target)
++            // Qwen3.5-4B translated "Thursday... actually, Friday" literally even
++            // with examples; writing the corrected sentence first made it drop the old value.
++            let corrected = custom == nil ? appliedSelfCorrections(rawTranscription) : rawTranscription
++            let twoStep = custom == nil && corrected == rawTranscription && containsCorrectionCue(rawTranscription)
++            if twoStep {
++                task += """
++
++                First, on a line starting with "Corrected:", write the transcript in its own language with the self-corrections applied.
++                Then, on a line starting with "Translation:", write the translation of the corrected line only.
++                """
++            }
++            if custom == nil, let example = translationCorrectionExample(target: target, twoStep: twoStep) {
++                task += "\n\nExample:\n" + example
++            }
++            return body(
++                task: task,
++                selection: nil,
++                context: nil,
++                style: options.style,
++                vocabulary: options.vocabulary,
++                // The explicit translation target is authoritative. Passing other
++                // variants made Qwen3.5-4B output Chinese for target en.
++                languageVariants: [],
++                styleExamples: styleExamples,
++                transcriptPrefix: corrected == rawTranscription ? "Speech transcript: " : "Original speech (reference only; do not translate it): ",
++                afterTranscript: corrected == rawTranscription ? nil : "Translate this corrected transcript: \(corrected)",
++                outputCue: twoStep ? "Corrected:" : "Translation:"
++            )
++        case .edit:
++            let usesChinese = (hanShare(in: options.selectedText) ?? 0) >= 0.5
++            var task = custom ?? (usesChinese ? chineseEditInstruction : englishEditInstruction)
++            switch editRetry {
++            case let .droppedTerms(terms):
++                let quoted = terms.map { usesChinese ? "“\($0)”" : "\"\($0)\"" }.joined(separator: usesChinese ? "、" : ", ")
++                task += usesChinese
++                    ? "\n\n第一次输出删掉了选中文字里的日期或时间。请原样保留\(quoted)。"
++                    : "\n\nThe first attempt dropped a date or time from the selected text. Keep \(quoted) exactly as written."
++            case .leaked:
++                task += usesChinese
++                    ? "\n\n第一次输出重复了内容，或抄入了选中范围以外的文字。只输出修改后的选中文字，只输出一遍。"
++                    : "\n\nThe first attempt repeated text or copied text from around the selection. Output only the edited selected text, once."
++            case .unchanged:
++                task += usesChinese
++                    ? "\n\n第一次输出未能安全地完成修改：输出与选中文字完全相同。现在执行指令，输出必须与选中文字不同。"
++                    : "\n\nThe first attempt did not safely apply the edit: it returned the selected text unchanged. Apply the instruction now; the output must differ from the selected text."
++            case .unsafe:
++                task += usesChinese
++                    ? "\n\n第一次输出未能安全地完成修改。只输出修改后的正文，不得包含修改指令。若两个替换词发音相同，根据原文语境选择正确的写法。"
++                    : "\n\nThe first attempt did not safely apply the edit. Output only the revised passage, never the replacement instruction. If both replacement words sound the same, use the spelling that fits the selected text."
++            case nil:
++                break
++            }
++            // A whole-field edit sends the field as both selection and context. Repeating it
++            // made Qwen3.5-4B copy the text back unchanged for a tone instruction.
++            let selected = options.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
++            // A whole-field edit sends the field as both selection and context. Repeating it
++            // made Qwen3.5-4B copy the text back unchanged for a tone instruction.
++            func unlessSelection(_ context: String) -> String {
++                context.trimmingCharacters(in: .whitespacesAndNewlines) == selected ? "" : context
++            }
++            return body(
++                task: task,
++                selection: options.selectedText,
++                context: (before: unlessSelection(options.contextBefore), after: unlessSelection(options.contextAfter)),
++                style: options.style,
++                vocabulary: options.vocabulary,
++                languageVariants: options.languageVariants,
++                styleExamples: styleExamples,
++                selectionPrefix: usesChinese ? "选中文字：" : "Selected text: ",
++                transcriptPrefix: usesChinese ? "指令：" : "Instruction: ",
++                outputCue: usesChinese ? "输出：" : "Output:"
++            )
++        case .write:
++            let usesChinese = (hanShare(in: rawTranscription) ?? 0) >= 0.5
++            var task = custom ?? (usesChinese ? chineseWriteInstruction : englishWriteInstruction)
++            if retryingWritePlaceholder {
++                task += usesChinese
++                    ? "\n\n第一次输出包含占位符。不知道的姓名或细节直接省略，输出可以直接发送的完整消息。"
++                    : "\n\nThe first attempt contained a placeholder. Leave out any name or detail you do not know and output a complete message that can be sent as is."
++            }
++            return body(
++                task: task,
++                selection: nil,
++                context: (before: options.contextBefore, after: options.contextAfter),
++                style: options.style,
++                vocabulary: options.vocabulary,
++                languageVariants: options.languageVariants,
++                styleExamples: styleExamples,
++                transcriptPrefix: usesChinese ? "指令：" : "Instruction: ",
++                outputCue: usesChinese ? "消息：" : "Message:"
++            )
++        }
++    }
++
++    static func compose(
++        rawTranscription: String,
++        options: LocalAPIComposeOptions,
++        generate: (String) async throws -> String
++    ) async throws -> String {
++        // A list item is edited without its marker, which then goes back on: "2." alone was read
++        // as a time by the date guard, and the edit was not applied.
++        if options.mode == .edit, let marker = listMarker(of: options.selectedText) {
++            var item = options
++            item.selectedText = String(options.selectedText.dropFirst(marker.count))
++            let edited = try await compose(rawTranscription: rawTranscription, options: item, generate: generate)
++            return listMarker(of: edited) == nil ? marker + edited : edited
++        }
++        guard let initialPrompt = instruction(for: options, rawTranscription: rawTranscription) else {
++            throw LocalAPIError(message: "This operation has no compose prompt.")
++        }
++        let first = try await generate(initialPrompt).trimmingCharacters(in: .whitespacesAndNewlines)
++        if options.mode == .dictate, leaksContext(first, rawTranscription: rawTranscription, options: options) {
++            VoxtLog.warning("Local API dictate output repeated the cursor context; retrying once.")
++            guard let retryPrompt = instruction(for: options, rawTranscription: rawTranscription, retryingContextLeak: true) else {
++                return rawTranscription
++            }
++            let retried = try await generate(retryPrompt).trimmingCharacters(in: .whitespacesAndNewlines)
++            guard !retried.isEmpty, !leaksContext(retried, rawTranscription: rawTranscription, options: options) else {
++                VoxtLog.warning("Local API dictate output repeated the cursor context after retry; returning raw transcript.")
++                return rawTranscription
++            }
++            return laidOutMessage(numberedCountedLines(appliedSelfCorrections(retried)))
++        }
++        if options.mode == .dictate, losesMixedDictationContent(first, rawText: rawTranscription) {
++            VoxtLog.warning("Local API dictate cleanup lost mixed-language content; retrying previous prompt once.")
++            do {
++                guard let previousPrompt = instruction(
++                    for: options, rawTranscription: rawTranscription, retryingMixedDictation: true
++                ) else { return rawTranscription }
++                let retried = try await generate(previousPrompt).trimmingCharacters(in: .whitespacesAndNewlines)
++                if !losesMixedDictationContent(retried, rawText: rawTranscription) { return retried }
++            } catch {
++                if error is CancellationError { throw error }
++            }
++            VoxtLog.warning("Local API dictate cleanup discarded after retry: mixed-language content lost; returning raw transcript.")
++            return rawTranscription
++        }
++        // Same condition as the two-step translate prompt in instruction(for:).
++        if options.mode == .translate, options.customPrompt == nil, appliedSelfCorrections(rawTranscription) == rawTranscription,
++           containsCorrectionCue(rawTranscription) {
++            if let translation = translationAfterCorrection(first) { return translation }
++            VoxtLog.warning("Local API translate omitted the Translation line; retrying with the one-step prompt.")
++            var oneStep = options
++            oneStep.mode = .translate
++            guard let prompt = instruction(for: oneStep) else { return first }
++            return try await generate(prompt).trimmingCharacters(in: .whitespacesAndNewlines)
++        }
++        if options.mode == .write {
++            let source = [rawTranscription, options.contextBefore, options.contextAfter].joined(separator: "\n")
++            guard containsPlaceholder(first, allowedIn: source) else { return first }
++            VoxtLog.warning("Local API write output contained a placeholder; retrying once.")
++            guard let retryPrompt = instruction(for: options, rawTranscription: rawTranscription, retryingWritePlaceholder: true) else {
++                throw LocalAPIError(message: "This operation has no compose prompt.")
++            }
++            let retried = try await generate(retryPrompt).trimmingCharacters(in: .whitespacesAndNewlines)
++            guard containsPlaceholder(retried, allowedIn: source) else { return retried }
++            VoxtLog.warning("Local API write output still contained a placeholder after one retry; nothing inserted.")
++            throw LocalAPIError(message: "Couldn't write that message. Try saying who it's for.")
++        }
++        if options.mode == .dictate { return laidOutMessage(numberedCountedLines(appliedSelfCorrections(first))) }
++        guard options.mode == .edit else { return first }
++        let edited = withoutRepeatedClosing(withoutSurroundingField(first, options: options), options: options)
++        let selection = options.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
++        let noChangeRequested = ["leave unchanged", "leave this unchanged", "keep it as is", "do not change", "don't change", "no change", "保持原样", "不要改", "不改"]
++            .contains { rawTranscription.localizedCaseInsensitiveContains($0) }
++        func rejected(_ text: String) -> Bool {
++            text.isEmpty || (!noChangeRequested && text == selection)
++                || containsEditInstructionLeakage(text, instruction: rawTranscription, selection: selection)
++                || leaksContext(text, rawTranscription: rawTranscription, options: options)
++        }
++        let droppedFirst = rejected(edited) ? [] : missingDateOrTimeTerms(rawTranscription, selection: selection, output: edited)
++        guard rejected(edited) || !droppedFirst.isEmpty else { return edited }
++        let retry: EditRetry = !droppedFirst.isEmpty ? .droppedTerms(droppedFirst)
++            : !edited.isEmpty && edited == selection ? .unchanged
++            : leaksContext(edited, rawTranscription: rawTranscription, options: options) ? .leaked : .unsafe
++        guard let retryPrompt = instruction(for: options, rawTranscription: rawTranscription, editRetry: retry) else {
++            throw EditNotApplied()
++        }
++        VoxtLog.warning("Local API edit rejected unchanged output or instruction leakage; retrying once.")
++        do {
++            let retried = withoutRepeatedClosing(withoutSurroundingField(
++                try await generate(retryPrompt).trimmingCharacters(in: .whitespacesAndNewlines), options: options), options: options)
++            guard !rejected(retried),
++                  missingDateOrTimeTerms(rawTranscription, selection: selection, output: retried).isEmpty else { throw EditNotApplied() }
++            return retried
++        } catch {
++            if error is CancellationError { throw error }
++            VoxtLog.warning("Local API edit not applied after one retry; preserving selection.")
++            throw EditNotApplied()
++        }
++    }
++
++    // MARK: Message layout
++
++    /// Lays out a dictated message that opens with a greeting and has a list, either from the
++    /// model or as three or more points in one sentence ("Hi Karen, X, Y, and Z. Could you…?
++    /// Thanks."): greeting line, paragraphs, numbered points, sign-off line. Only line breaks,
++    /// numbering, capitals, end punctuation and a leading filler change. Qwen3.5-4B kept such
++    /// points in one sentence; asked to number them, it invented intros
++    /// ("Two things:") and dropped a sentence, so the layout is done here.
++    static func laidOutMessage(_ text: String) -> String {
++        let chinese = (hanShare(in: text) ?? 0) >= 0.5
++        var blocks = text.components(separatedBy: "\n\n")
++            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
++        guard !blocks.isEmpty, let greeting = splitGreeting(blocks[0], chinese: chinese) else { return text }
++        blocks[0] = greeting.rest
++        var signOff: String?
++        if let last = blocks.last, let split = splitSignOff(last, chinese: chinese) {
++            blocks[blocks.count - 1] = split.rest
++            signOff = split.signOff
++        }
++        blocks = blocks.flatMap { block in numberedPoints(in: block, chinese: chinese) ?? [block] }.filter { !$0.isEmpty }
++        let numbered = try! NSRegularExpression(pattern: #"(?m)^\d+[.)] "#)
++        guard blocks.contains(where: { numbered.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil }) else {
++            return text
++        }
++        if !chinese, let first = blocks.first { blocks[0] = first.prefix(1).uppercased() + first.dropFirst() }
++        return ([greeting.label, greeting.line] + blocks + [signOff]).compactMap { $0 }.joined(separator: "\n\n")
++    }
++
++    /// Numbers a run of two or more lines that starts with "First"/"第一" and continues with
++    /// counting words ("- Second, …", "- 还有，…"), dropping those words and any bullet.
++    static func numberedCountedLines(_ text: String) -> String {
++        let counted = #"^(?:[-*•]\s*)?((?i:first|second|third|fourth|fifth|and also|also|finally|lastly)\b[,:]?\s*|(?:第[一二三四五六七八九十]+|还有|另外|最后)[，,:：、]\s*)"#
++        var lines = text.components(separatedBy: "\n")
++        var index = 0
++        while index < lines.count {
++            var end = index
++            while end < lines.count, lines[end].range(of: counted, options: .regularExpression) != nil { end += 1 }
++            let starts = lines[index].range(of: #"^(?:[-*•]\s*)?(?i:first\b|第一)"#, options: .regularExpression) != nil
++            guard end - index >= 2, starts else { index = max(end, index + 1); continue }
++            for (number, line) in (index..<end).enumerated() {
++                var item = lines[line]
++                item.removeSubrange(item.range(of: counted, options: .regularExpression)!)
++                lines[line] = "\(number + 1). " + item.prefix(1).uppercased() + item.dropFirst()
++            }
++            index = end
++        }
++        return lines.map { countedPointsInline($0) ?? $0 }.joined(separator: "\n")
++    }
++
++    /// "Intro, first, X, second, Y, and also Z. Rest." → intro, numbered X/Y/Z, rest. The first
++    /// marker must be "first"/"第一" at the start of a clause, followed by at least one more marker.
++    private static func countedPointsInline(_ line: String) -> String? {
++        let chinese = (hanShare(in: line) ?? 0) >= 0.5
++        let pattern = chinese
++            ? #"(?:^|(?<=[，。；：,;:]))\s*(第[一二三四五]|还有|另外|最后)[，,、:：]?\s*"#
++            : #"(?:^|(?<=[.;,:!?]\s))(?:and\s+)?((?i:first|second|third|fourth|fifth|also|finally|lastly))\b,?\s+"#
++        let regex = try! NSRegularExpression(pattern: pattern)
++        let matches = regex.matches(in: line, range: NSRange(line.startIndex..., in: line)).compactMap { match in
++            Range(match.range, in: line).flatMap { whole in Range(match.range(at: 1), in: line).map { (whole, line[$0].lowercased()) } }
++        }
++        guard let start = matches.firstIndex(where: { $0.1 == "first" || $0.1 == "第一" }) else { return nil }
++        var markers = [matches[start]]
++        for match in matches[(start + 1)...] where match.1 != "first" && match.1 != "第一" { markers.append(match) }
++        guard markers.count >= 2 else { return nil }
++        let ends: Set<Character> = chinese ? ["。", "！", "？"] : [".", "!", "?"]
++        let lastStart = markers[markers.count - 1].0.upperBound
++        var lastEnd = line.endIndex
++        var cursor = lastStart
++        while cursor < line.endIndex {
++            let next = line.index(after: cursor)
++            if ends.contains(line[cursor]), chinese || next == line.endIndex || line[next] == " " { lastEnd = next; break }
++            cursor = next
++        }
++        let trim = CharacterSet(charactersIn: chinese ? "，,；;。、 " : ",;. ").union(.whitespaces)
++        var items: [String] = []
++        for (position, marker) in markers.enumerated() {
++            let end = position + 1 < markers.count ? markers[position + 1].0.lowerBound : lastEnd
++            var item = String(line[marker.0.upperBound..<end]).trimmingCharacters(in: trim)
++            if !chinese, item.lowercased().hasSuffix(" and") { item = String(item.dropLast(4)).trimmingCharacters(in: trim) }
++            item = item.trimmingCharacters(in: CharacterSet(charactersIn: chinese ? "。！？" : ".!?"))
++            guard !item.isEmpty else { return nil }
++            items.append(chinese ? item + "。" : item.prefix(1).uppercased() + item.dropFirst() + ".")
++        }
++        var intro = String(line[..<markers[0].0.lowerBound]).trimmingCharacters(in: .whitespaces)
++        let rest = String(line[lastEnd...]).trimmingCharacters(in: .whitespaces)
++        let list = items.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
++        var blocks: [String] = []
++        if intro.hasSuffix(",") || intro.hasSuffix("，") || intro.hasSuffix(":") || intro.hasSuffix("：") {
++            intro = String(intro.dropLast()) + (chinese ? "：" : ":")
++            blocks.append(intro + "\n" + list)
++        } else {
++            if !intro.isEmpty { blocks.append(intro) }
++            blocks.append(list)
++        }
++        if !rest.isEmpty { blocks.append(rest) }
++        return blocks.joined(separator: "\n\n")
++    }
++
++    private static func firstMatch(_ pattern: String, in text: String) -> [String?]? {
++        let regex = try! NSRegularExpression(pattern: pattern)
++        guard let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
++        return (0..<match.numberOfRanges).map { Range(match.range(at: $0), in: text).map { String(text[$0]) } }
++    }
++
++    /// Greeting at the start, after an optional filler or a short label ("Email to my landlord, Hi Karen,").
++    private static func splitGreeting(_ block: String, chinese: Bool) -> (label: String?, line: String, rest: String)? {
++        if chinese {
++            guard let m = firstMatch(#"^(?:(?:嗯|呃|额|那个)[，,]\s*)*((?:[\p{Han}A-Za-z0-9]{1,8}?(?:您好|你好))|大家好|各位好)([，,！!：:])\s*"#, in: block),
++                  let whole = m[0], let name = m[1] else { return nil }
++            return (nil, name + "，", String(block.dropFirst(whole.count)))
++        }
++        let names = #"(?:\s+(?:\p{Lu}[\p{L}'’.-]*|team|all|everyone|everybody|there|guys|folks)){0,3}"#
++        if let m = firstMatch(#"^(?:(?i:um|uh|so|okay|ok)[,.]?\s+)*((?i:hi|hey|hello|dear|good morning|good afternoon|good evening)"# + names + #")\s*[,!:.]\s*"#, in: block),
++           let whole = m[0], let line = m[1] {
++            return (nil, line.prefix(1).uppercased() + line.dropFirst() + ",", String(block.dropFirst(whole.count)))
++        }
++        if let m = firstMatch(#"^((?:[\p{L}'’]+\s+){0,4}[\p{L}'’]+)[,.]\s+((?:Hi|Hey|Hello|Dear)"# + names + #")\s*[,!:]\s*"#, in: block),
++           let whole = m[0], let label = m[1], let line = m[2] {
++            return (label.prefix(1).uppercased() + label.dropFirst() + ".", line + ",", String(block.dropFirst(whole.count)))
++        }
++        return nil
++    }
++
++    /// Sign-off at the very end ("Thanks." / "Thanks, Jo." / "谢谢，小林。").
++    private static func splitSignOff(_ block: String, chinese: Bool) -> (rest: String, signOff: String)? {
++        let pattern = chinese
++            ? #"(?:^|(?<=[。！？!?，,]))\s*(谢谢您|谢谢|多谢|辛苦了|麻烦了)(?:[，,]\s*(\p{Han}{1,4}))?([。！!]?)\s*$"#
++            : #"(?:^|(?<=[.!?]))\s*((?i:thanks so much|thanks a lot|thank you|many thanks|thanks|cheers|best regards|regards|all the best|best))(?:,?\s+(\p{Lu}[\p{L}'’-]*))?([.!]?)\s*$"#
++        guard let m = firstMatch(pattern, in: block), let whole = m[0], let word = m[1] else { return nil }
++        var rest = String(block.dropLast(whole.count)).trimmingCharacters(in: .whitespaces)
++        if chinese, rest.hasSuffix("，") || rest.hasSuffix(",") { rest = String(rest.dropLast()) + "。" }
++        let signOff = m[2].map { word + (chinese ? "，" : ",") + "\n" + $0 } ?? word + (m[3] ?? "")
++        return (rest, signOff)
++    }
++
++    /// Splits a one-line paragraph around its first sentence of three or more comma-separated
++    /// points that ends with "…, and Z" (还有/另外/以及 Z): [before, numbered points, after].
++    private static func numberedPoints(in block: String, chinese: Bool) -> [String]? {
++        guard !block.contains("\n") else { return nil }
++        let sentences = sentences(in: block)
++        for (position, sentence) in sentences.enumerated() {
++            guard let (lead, points) = points(in: sentence, chinese: chinese) else { continue }
++            let items = points.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
++            let separator = chinese ? "" : " "
++            let before = Array(sentences[..<position]) + [lead].compactMap { $0 }
++            return [before.joined(separator: separator), items, sentences[(position + 1)...].joined(separator: separator)]
++        }
++        return nil
++    }
++
++    static let targetLanguageTemplateVariable = "{{TARGET_LANGUAGE}}"
++
++    private static func translateTask(target: String) -> String {
++        """
++        Translate the transcribed speech into \(target).
++        The transcript may contain fillers, repetitions and self-corrections:
++        do not carry them into the translation, but preserve meaning, names, and numbers.
++        Apply self-corrections before translating. When the speaker says a detail and then replaces it, even after a pause,
++        an ellipsis or a full stop (Thursday... actually, Friday; three, sorry, four; 周一，不对，周二),
++        keep only the corrected detail: the translation contains only the replacement.
++        Never mention, translate or explain the earlier value.
++        Translate only what was said: add no places, rooms, times, reasons or other details, and keep every name, number and date.
++        Output only the translation, without explanations or the original text.
++        """
++    }
++
++    /// The built-in instruction of each mode, for the phone's Developer prompt editor. English
++    /// variants; Translate keeps the target-language placeholder.
++    static func builtInPrompts() -> [String: String] {
++        [
++            LocalAPIComposeMode.dictate.rawValue: englishDictationInstruction,
++            LocalAPIComposeMode.edit.rawValue: englishEditInstruction,
++            LocalAPIComposeMode.translate.rawValue: translateTask(target: targetLanguageTemplateVariable),
++            LocalAPIComposeMode.write.rawValue: englishWriteInstruction,
++        ]
++    }
++
++    /// The leading "2. ", "- " or "• " of a one-line selection, nil otherwise.
++    static func listMarker(of text: String) -> String? {
++        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).contains("\n"),
++              let range = text.range(of: #"^\s*(?:\d+[.)]|[-*•])\s+"#, options: .regularExpression) else { return nil }
++        return String(text[range])
++    }
++
++    /// Sentences of one line, each with its end punctuation.
++    static func sentences(in line: String) -> [String] {
++        var sentences: [String] = [], current = ""
++        for (index, character) in zip(line.indices, line) {
++            current.append(character)
++            let next = line.index(after: index)
++            if "。！？".contains(character) || (".!?".contains(character) && (next == line.endIndex || line[next] == " ")) {
++                sentences.append(current.trimmingCharacters(in: .whitespaces)); current = ""
++            }
++        }
++        if !current.trimmingCharacters(in: .whitespaces).isEmpty { sentences.append(current.trimmingCharacters(in: .whitespaces)) }
++        return sentences
++    }
++
++    /// The points of one sentence, and the clause before them when the points follow ", so".
++    private static func points(in sentence: String, chinese: Bool) -> (lead: String?, points: [String])? {
++        var body = sentence
++        if chinese {
++            guard body.hasSuffix("。") || !"！？".contains(body.last ?? " ") else { return nil }
++            body = body.trimmingCharacters(in: CharacterSet(charactersIn: "。"))
++            for filler in ["那个，", "嗯，", "呃，", "额，"] where body.hasPrefix(filler) { body = String(body.dropFirst(filler.count)) }
++            var parts = body.components(separatedBy: CharacterSet(charactersIn: "，,")).map { $0.trimmingCharacters(in: .whitespaces) }
++            guard parts.count >= 3, let joiner = ["还有", "另外", "以及"].first(where: { parts[parts.count - 1].hasPrefix($0) }) else { return nil }
++            parts[parts.count - 1] = String(parts[parts.count - 1].dropFirst(joiner.count))
++            let subordinate = ["所以", "但是", "因为", "如果", "不过", "可是", "然后"]
++            guard parts.allSatisfy({ part in part.unicodeScalars.filter { $0.properties.isIdeographic }.count >= 3
++                && !subordinate.contains(where: { part.hasPrefix($0) }) }) else { return nil }
++            return (nil, parts.map { $0 + "。" })
++        }
++        guard body.hasSuffix(".") || !"!?".contains(body.last ?? " ") else { return nil }
++        body = body.trimmingCharacters(in: CharacterSet(charactersIn: "."))
++        if let filler = body.range(of: #"^(?i:so|ah|uh|um|okay),?\s+"#, options: .regularExpression) { body.removeSubrange(filler) }
++        var parts = body.components(separatedBy: ", ")
++        var lead: String?
++        if let so = parts.indices.dropFirst().last(where: { parts[$0].lowercased().hasPrefix("so ") }), parts.count - so >= 3 {
++            lead = parts[..<so].joined(separator: ", ") + "."
++            parts = Array(parts[so...])
++            parts[0] = String(parts[0].dropFirst(3))
++        }
++        guard parts.count >= 3, parts[parts.count - 1].hasPrefix("and ") else { return nil }
++        parts[parts.count - 1] = String(parts[parts.count - 1].dropFirst(4))
++        let subordinate = ["so", "but", "because", "which", "who", "if", "when", "although", "though", "then"]
++        guard parts.allSatisfy({ part in
++            let words = part.split(separator: " ")
++            return words.count >= 3 && !subordinate.contains(words[0].lowercased())
++        }) else { return nil }
++        return (lead, parts.map { $0.prefix(1).uppercased() + $0.dropFirst() + "." })
++    }
++
++    /// The edited selection when the model returned it inside the unchanged text around it
++    /// (before + edit + after); otherwise the output unchanged.
++    static func withoutSurroundingField(_ output: String, options: LocalAPIComposeOptions) -> String {
++        let before = options.contextBefore.trimmingCharacters(in: .whitespacesAndNewlines)
++        let after = options.contextAfter.trimmingCharacters(in: .whitespacesAndNewlines)
++        let selection = options.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
++        guard !before.isEmpty || !after.isEmpty, before != selection, after != selection,
++              output.hasPrefix(before), output.hasSuffix(after), output.count > before.count + after.count else { return output }
++        let middle = output.dropFirst(before.count).dropLast(after.count).trimmingCharacters(in: .whitespacesAndNewlines)
++        return middle.isEmpty ? output : middle
++    }
++
++    /// Drops closing sentences ("Thank you.", "谢谢！") the model appended to an edit when the
++    /// selection had none and the field already continues with a closing. One edit added
++    /// "Thank you." right before the mail's own "Thanks.".
++    static func withoutRepeatedClosing(_ output: String, options: LocalAPIComposeOptions) -> String {
++        let closing = #"^(?i:thanks|thank you|thanks so much|thanks a lot|many thanks|cheers|best|best regards|regards|谢谢|谢谢您|多谢|辛苦了)[\s,，.。!！]*(?:\p{L}+[.。!！]?)?$"#
++        func isClosing(_ sentence: String) -> Bool { sentence.range(of: closing, options: .regularExpression) != nil }
++        let next = options.contextAfter.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
++        guard let next, isClosing(sentences(in: next).first ?? next),
++              !(sentences(in: options.selectedText.trimmingCharacters(in: .whitespacesAndNewlines)).last.map(isClosing) ?? false),
++              !output.contains("\n") else { return output }
++        var parts = sentences(in: output)
++        while parts.count > 1, let last = parts.last, isClosing(last) { parts.removeLast() }
++        let chinese = (hanShare(in: output) ?? 0) >= 0.5
++        return parts.joined(separator: chinese ? "" : " ")
++    }
++
++    struct EditNotApplied: Error, LocalizedError {
++        var errorDescription: String? { "Couldn't apply that edit" }
++    }
++
++    /// True when the output copies a sentence from the text around the cursor that the speech
++    /// and selection do not contain, or repeats a sentence more often than they do. The model has
++    /// prefixed the previous insertion in Dictate and returned the note about 2.5 times in
++    /// Edit. Sentences under six letters are ignored, as they recur naturally.
++    static func leaksContext(_ output: String, rawTranscription: String, options: LocalAPIComposeOptions) -> Bool {
++        func normalized(_ text: String) -> String {
++            String(text.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(Character.init))
++        }
++        func sentences(_ text: String) -> [String] {
++            text.components(separatedBy: CharacterSet(charactersIn: "。！？!?.;；\n")).map(normalized).filter { $0.count >= 6 }
++        }
++        func occurrences(of sentence: String, in text: String) -> Int {
++            text.components(separatedBy: sentence).count - 1
++        }
++        let out = normalized(output), speech = normalized(rawTranscription), selection = normalized(options.selectedText)
++        for sentence in sentences(options.contextBefore) + sentences(options.contextAfter)
++        where out.contains(sentence) && !speech.contains(sentence) && !selection.contains(sentence) {
++            return true
++        }
++        return Set(sentences(output)).contains { sentence in
++            occurrences(of: sentence, in: out) > max(1, occurrences(of: sentence, in: speech), occurrences(of: sentence, in: selection))
++        }
++    }
++
++    enum EditRetry: Equatable { case unchanged, unsafe, leaked, droppedTerms([String]) }
++
++    /// Applies a spoken correction when one number, time or weekday directly replaces another
++    /// ("three, sorry, four", "Thursday... actually, Friday", "九点，不对，十点"). Anything less
++    /// certain is left to the model. Qwen3.5-4B kept both values in translations.
++    static func appliedSelfCorrections(_ text: String) -> String {
++        let number = #"(?:\d{1,4}(?::\d{2})?|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)"#
++        let day = #"(?:mon|tues|wednes|thurs|fri|satur|sun)day"#
++        // A filler may sit before the cue, and ASR may end the sentence before "sorry":
++        // "Monday, uh, sorry, Tuesday" came back as "Monday. Ah, sorry Tuesday".
++        let cue = #"\s*(?:(?:,|\.{2,3}|…|—|-)\s*(?:(?:uh|um|ah|er),?\s*)?(?:sorry|actually|i mean|no wait|no|or rather)|\.\s+(?:(?:uh|um|ah|er),?\s+)?sorry)\s*[,.…—-]?\s*"#
++        let zhNumber = #"[0-9一二三四五六七八九十两]+点半?"#
++        let zhDay = #"(?:周|星期|礼拜)[一二三四五六日天]"#
++        let zhCue = #"[，,、]\s*(?:(?:呃|额|嗯|啊)[，,]\s*)?(?:不对|不是|我是说|其实是|哦不)[，,]?\s*"#
++        let patterns = [
++            "(?i)\\b\(number)\\b\(cue)(\(number))\\b", "(?i)\\b\(day)\\b\(cue)(\(day))\\b",
++            "\(zhNumber)\(zhCue)(\(zhNumber))", "\(zhDay)\(zhCue)(\(zhDay))",
++        ]
++        var result = text
++        for pattern in patterns {
++            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
++            result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "$1")
++        }
++        return result
++    }
++
++    /// Words that usually introduce a spoken self-correction. "Actually" or "no" can also be
++    /// content; a match only switches Translate to writing the corrected line first.
++    static func containsCorrectionCue(_ text: String) -> Bool {
++        let patterns = [#"(?i)(?:^|[\s,.…—-])(?:actually|sorry|i mean|no wait|or rather)\b"#, #"(?i)\bno[,.…!—]"#,
++                        #"不对|不是，|其实是|我是说|哦不|应该是"#]
++        return patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
++    }
++
++    /// The text after the last "Translation:" label, or nil when the model did not write one.
++    static func translationAfterCorrection(_ output: String) -> String? {
++        guard let label = output.range(of: "Translation:", options: [.backwards, .caseInsensitive]) else { return nil }
++        let text = output[label.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
++        return text.isEmpty ? nil : text
++    }
++
++    /// Dates and times in the selection that a tone or length edit dropped. Empty when the
++    /// instruction itself names a date or time, since then it is a requested replacement.
++    /// A Chinese numeral before 点 counts only after a time of day or before 钟/半: 一点 alone means "a bit".
++    static func missingDateOrTimeTerms(_ instruction: String, selection: String, output: String) -> [String] {
++        let patterns = [
++            #"(?i)\b(?:today|tonight|tomorrow|yesterday|noon|midnight|this (?:morning|afternoon|evening|week|weekend)|next week|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\b"#,
++            #"(?i)\b\d{1,2}(?::\d{2})?\s?(?:a\.?m\.?|p\.?m\.?)?(?=\W|$)"#,
++            #"今天|今晚|明天|后天|昨天|上午|下午|中午|晚上|早上|凌晨|(?:周|星期|礼拜)[一二三四五六日天]|[0-9]+点半?|(?<=[午上晚早晨])[一二三四五六七八九十两]+点半?|[一二三四五六七八九十两]+点(?:钟|半)"#,
++        ]
++        func terms(in text: String) -> [(Range<String.Index>, String)] {
++            patterns.flatMap { pattern -> [(Range<String.Index>, String)] in
++                guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
++                return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
++                    Range(match.range, in: text).map { ($0, String(text[$0])) }
++                }
++            }.sorted { $0.0.lowerBound < $1.0.lowerBound }
++        }
++        let replacement = #"(?i)改成|换成|改为|改到|换到|挪到|\b(?:change|replace|make it|move|switch)\b"#
++        let spokenTime = #"[0-9一二三四五六七八九十两]+点"#
++        let namesATime = instruction.range(of: replacement, options: .regularExpression) != nil
++            || instruction.ranges(of: try! Regex(spokenTime)).contains { instruction[$0] != "一点" }
++        guard terms(in: instruction).isEmpty, !namesATime else { return [] }
++        var missing: [String] = []
++        for (_, term) in terms(in: selection) where !output.localizedCaseInsensitiveContains(term) && !missing.contains(term) {
++            missing.append(term)
++        }
++        return missing
++    }
++
++    /// Template slots such as [Name], {Your Name}, <Recipient> or 【姓名】 that a Write result
++    /// must never insert. Brackets the user dictated or that surround the cursor are content.
++    /// A slot needs a letter and no padding spaces, so "[ ]", "[1]" and "2 < 3 and 4 > 1" pass.
++    static func containsPlaceholder(_ output: String, allowedIn source: String) -> Bool {
++        let patterns = [#"\{\{?[^\s{}][^{}\n]{0,40}?\}?\}"#, #"\[[^\s\[\]][^\[\]\n]{0,40}?\]"#,
++                        #"<[^\s<>][^<>\n]{0,38}[^\s<>]>"#, #"【[^】\n]{1,20}】"#, #"［[^］\n]{1,20}］"#]
++        for pattern in patterns {
++            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
++            for match in regex.matches(in: output, range: NSRange(output.startIndex..., in: output)) {
++                guard let range = Range(match.range, in: output) else { continue }
++                let slot = String(output[range])
++                let letters = slot.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
++                if letters >= 2, !source.contains(slot) { return true }
++            }
++        }
++        return false
++    }
++
++    /// One correction example in the target language for the languages the first release
++    /// supports; other targets get the rule alone rather than an example in the wrong language.
++    static func translationCorrectionExample(target: String, twoStep: Bool = false) -> String? {
++        let tag = target.lowercased()
++        let pairs: [(speech: String, corrected: String, translation: String)]
++        if tag.hasPrefix("zh-hant") || tag == "zh-tw" || tag == "zh-hk" {
++            pairs = [("Call Sam on Monday, actually Tuesday, at ten.", "Call Sam on Tuesday at ten.", "週二十點給Sam打電話。"),
++                     ("Meet me at three, sorry, four.", "Meet me at four.", "四點見。")]
++        } else if tag.hasPrefix("zh") {
++            pairs = [("Call Sam on Monday, actually Tuesday, at ten.", "Call Sam on Tuesday at ten.", "周二十点给Sam打电话。"),
++                     ("Meet me at three, sorry, four.", "Meet me at four.", "四点见。")]
++        } else if tag.hasPrefix("en") {
++            pairs = [("周一，不对，周二上午十点给小陈打电话。", "周二上午十点给小陈打电话。", "Call Xiao Chen on Tuesday at 10 a.m.")]
++        } else {
++            return nil
++        }
++        return pairs.map { pair in
++            twoStep
++                ? "Speech transcript: \(pair.speech)\nCorrected: \(pair.corrected)\nTranslation: \(pair.translation)"
++                : "Speech transcript: \(pair.speech)\nTranslation: \(pair.translation)"
++        }.joined(separator: "\n\n")
++    }
++
++    /// Detects copied replacement instructions, including ASR's "cash to cash" and
++    /// the model's hyphenated version. Existing selection text is never disallowed.
++    static func containsEditInstructionLeakage(_ output: String, instruction: String, selection: String) -> Bool {
++        func normalized(_ text: String) -> String {
++            text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
++                .filter { !$0.isEmpty }.joined(separator: " ")
++        }
++        let output = " " + normalized(output) + " "
++        let selection = " " + normalized(selection) + " "
++        let instruction = normalized(instruction)
++        var fragments: [String] = []
++        if instruction.split(separator: " ").count >= 3 { fragments.append(instruction) }
++        // Restrict extraction to explicit replacement operations, not every phrase
++        // containing "to" (which could be legitimate edited prose).
++        let patterns = [#"\b(?:fix|change|replace|correct)\s+(.+?\s+(?:to|with)\s+.+)$"#,
++                        #"(?:把|将)(.+?(?:改成|换成|替换成).+)$"#]
++        for pattern in patterns {
++            guard let regex = try? NSRegularExpression(pattern: pattern),
++                  let match = regex.firstMatch(in: instruction, range: NSRange(instruction.startIndex..., in: instruction)),
++                  let range = Range(match.range(at: 1), in: instruction) else { continue }
++            fragments.append(String(instruction[range]))
++        }
++        return fragments.contains { fragment in
++            let phrase = " " + fragment + " "
++            // Han phrases need no word separators.
++            if (hanShare(in: fragment) ?? 0) >= 0.5 {
++                return output.contains(fragment) && !selection.contains(fragment)
++            }
++            return output.contains(phrase) && !selection.contains(phrase)
++        }
++    }
++
++    /// Human locale names next to the bare tags: models follow "English (United Kingdom)"
++    /// more reliably than "en-GB" alone.
++    static let languageVariantDisplayNames: [String: String] = [
++        "en-US": "English (United States)",
++        "en-GB": "English (United Kingdom)",
++        "en-AU": "English (Australia)",
++        "en-CA": "English (Canada)",
++        "zh-Hans": "Chinese, Simplified",
++        "zh-Hant": "Chinese, Traditional",
++        "es-ES": "Spanish (Spain)",
++        "es-MX": "Spanish (Mexico)",
++        "fr-FR": "French (France)",
++        "fr-CA": "French (Canada)",
++        "pt-PT": "Portuguese (Portugal)",
++        "pt-BR": "Portuguese (Brazil)",
++    ]
++
++    private static let chineseDictationInstruction = """
++    整理转写的口述内容。
++    删除口头词和无意的重复。遇到自我纠正，用最后确定的词替换原句中被改正的词，
++    保留原句的其余内容，包括未改动的时间。不要输出被替换的内容和纠正指令。
++    句号或问号后的纠正也要应用到前一句。
++    “不对”“其实”等词如果是在表达内容，不是更正前文，就要保留。
++    引号内或转述别人说的话，不要当作修改指令执行。
++    修正标点和列表。不要添加未说出的内容，不要改变数字的写法。
++    保持口述原本的语言，包括中英混合的内容。不要翻译。
++    
++    当说话者明确列举不同事项时，每个事项单独一行。
++    直接列举的事项用“- ”项目符号。说话者用第一、第二、第三、还有、最后来分点时，每点单独一行，
++    编号写成 1. 2. 3.，去掉“第一”“还有”等分点词。
++    保留引导句并单独一行。普通叙述保持一个段落，不要改成列表。
++    带称呼并分点的消息按邮件排版：称呼单独一行，空一行，再写引导句和编号列表，
++    空一行写列表后的内容，结尾的“谢谢”等单独一行。
++    保留原词和事实。不要添加事项或解释。
++    
++    示例：
++    口述：带三样东西：钥匙、外套和水。
++    输出：
++    带三样东西：
++    - 钥匙
++    - 外套
++    - 水
++    
++    口述：李老师您好，有两件事，第一，报告晚交一天，还有，会议改到周一。您看可以吗？谢谢。
++    输出：
++    李老师您好，
++    
++    有两件事：
++    1. 报告晚交一天。
++    2. 会议改到周一。
++    
++    您看可以吗？
++    
++    谢谢。
++    
++    自我纠正示例：
++    口述：把评审改到周三——不对——周四下午三点。
++    输出：把评审改到周四下午三点。
++    
++    其他示例：
++    口述：我们周一中午见面好吗？不对，改成周二。
++    输出：我们周二中午见面好吗？
++    口述：把文件发给小陈，不对，小林，下午发。
++    输出：把文件发给小林，下午发。
++    口述：这个想法不对。他说“不对”，然后走了。
++    输出：这个想法不对。他说“不对”，然后走了。
++    
++    语音识别有时把停顿词写成“额”等字。仅当它独立出现且没有语法或实际含义时删除。
++    口述：快到了，额，五分钟。
++    输出：快到了，五分钟。
++    “名额”“额外”等词里的字有实际含义，必须保留。
++    普通句子保持在同一段，只有明确列举的事项才分行。只输出整理后的正文。
++    """
++
++    private static let englishDictationInstruction = """
++    Clean up the transcribed speech. Output only the final text in the same language.
++    Delete hesitation fillers such as um, uh and like. Only at the beginning of the entire transcript, outside quotes, strip "Um. So," or
++    "Um, so" as one filler sequence: do not leave "So" behind. Keep "so far" and causal so.
++    Apply the speaker's self-corrections to earlier words, even across a full stop or question mark.
++    Replace the old detail with the new one; do not leave the correction instruction in the result.
++    Keep meaningful actually, sorry or no. Copy every word inside quotation marks exactly,
++    including um, so and other fillers: quoted words are content, not speech to clean.
++    Remove an ASR artifact a/at only when it is a stray hesitation before an arrival duration.
++    Keep grammatical at/a, such as at ten minutes past three or a ten-minute break.
++    Keep all other words, facts, names, times and number spellings. Do not add content that was not said.
++    Keep the original spoken language, including when the speech mixes languages. Do not translate.
++    
++    Use a single paragraph for ordinary speech, even if it has several sentences.
++    Only make a list when the speaker explicitly lists items: put each item on its own line,
++    with '- ' bullets for named items. Keep the introduction.
++    When the speaker counts points (first, second, third, and also, finally), number them 1., 2., 3. on separate lines and drop the counting words.
++    
++    Example:
++    Speech: Bring three things: keys, a coat, and water.
++    Output:
++    Bring three things:
++    - keys
++    - a coat
++    - water
++    
++    Speech: Um. So, is the delivery on Tuesday at two? Actually, Wednesday.
++    Output: Is the delivery on Wednesday at two?
++    Speech: Move the review to Wednesday — no wait — Thursday at three.
++    Output: Move the review to Thursday at three.
++    Speech: On the way, at twenty minutes.
++    Output: On the way, twenty minutes.
++    Speech: Actually, I prefer Monday. The office is open.
++    Output: Actually, I prefer Monday. The office is open.
++    Speech: Um. So, can we start?
++    Output: Can we start?
++    Speech: He whispered "um" and stopped.
++    Output: He whispered "um" and stopped.
++    """
++
++    private static let previousChineseDictationInstruction = """
++    整理转写的口述内容。
++    删除口头词、重复和自我纠正，修正标点、列表和段落。不要添加未说出的内容。
++    保持口述原本的语言，包括中英混合的内容。不要翻译。
++
++    当说话者明确列举不同事项时，每个事项单独一行。
++    直接列举的事项用“- ”项目符号，第一、第二、第三这样的顺序用编号。
++    保留引导句并单独一行。普通叙述保持一个段落，不要改成列表。
++    保留原词和事实。不要添加事项或解释。
++
++    示例：
++    口述：带三样东西：钥匙、外套和水。
++    输出：
++    带三样东西：
++    - 钥匙
++    - 外套
++    - 水
++
++    自我纠正示例：
++    口述：把评审改到周三——不对——周四下午三点。
++    输出：把评审改到周四下午三点。
++    """
++
++    private static let previousEnglishDictationInstruction = """
++    Clean up the transcribed speech.
++    Remove fillers, repetitions and self-corrections, and fix punctuation,
++    lists and paragraphs. Do not add content that was not said.
++    Keep the original spoken language, including when the speech mixes languages.
++    Do not translate.
++
++    Keep the transcript's language. Never translate.
++    When the speech explicitly enumerates distinct items, put each item on its own line.
++    Use '- ' bullets for named items and numbered lines for first, second, third sequences.
++    Keep any introductory sentence on its own line. Keep ordinary narration in one paragraph;
++    do not turn it into a list. Preserve the words and facts. Never add items or explanations.
++
++    Example:
++    Speech: Bring three things: keys, a coat, and water.
++    Output:
++    Bring three things:
++    - keys
++    - a coat
++    - water
++
++    Self-correction example:
++    Speech: Move the review to Wednesday — no wait — Thursday at three.
++    Output: Move the review to Thursday at three.
++    """
++
++    private static let englishEditInstruction = """
++    Apply the instruction to the selected text. Change only what the instruction requests. For a whole-text change such as shortening or changing tone, apply that change to the whole text. Keep all names, numbers, times and facts that the instruction does not ask to change. For a specific replacement, copy the rest verbatim. Keep the selected text's language. The instruction comes from speech recognition and may contain sound-alike errors. If its literal reading would change nothing or make no sense, choose the similar-sounding word that fits the selected text. When both replacement words sound the same, choose the spelling that fits the selected text's context. Never insert the instruction's own phrasing into the result. A tone or length instruction always changes the wording: rewrite the whole text in the requested tone or length and keep its meaning, who says it to whom, and every name, number, date and time (today, tonight, Friday). Output only the edited text.
++    Example:
++    Selected text: The workshop is on Tuesday at noon.
++    Instruction: Actually make it Wednesday.
++    Output: The workshop is on Wednesday at noon.
++
++    Selected text: Stop sending me the reports late every Friday.
++    Instruction: Make this friendlier.
++    Output: Could you send the reports on time on Fridays? Thanks!
++    """
++
++    private static let chineseEditInstruction = """
++    按指令修改选中的文字。只改指令要求的部分。要求缩短或改变语气等整段修改时，对整段文字执行该要求。保留指令未要求更改的姓名、数字、时间和事实。要求替换具体内容时，其余文字逐字保留。保持选中文字的语言。指令来自语音识别，可能有同音词错误。如果按字面执行不会改变内容，或会造成语义不通，请选用符合选中文字语境的同音或近音词。如果两个替换词发音相同，根据选中文字的语境选择正确的写法。不要把指令本身的措辞插入结果。要求改变语气或长度时，必须改写措辞：按要求的语气或长度重写整段，保留原意、说话人与对象，以及每个姓名、数字、日期和时间。只输出修改后的文字。
++    示例：
++    选中文字：培训在周二中午开始。
++    指令：不对，改成周三。
++    输出：培训在周三中午开始。
++
++    选中文字：你们每周五的报告又迟交了。
++    指令：语气友好一点。
++    输出：每周五的报告这次又晚交了，下次请尽量按时提交，谢谢！
++    """
++
++    private static let englishWriteInstruction = """
++    Write the actual message requested by the instruction, addressed to its intended recipient. Use the instruction's language. Do not repeat or polish the instruction itself. Preserve all requested facts; add no facts, promises or explanations. If the instruction does not give a name or detail, leave it out. Never write placeholders such as [Name], <Name> or {Name}. Output only the message, ready to send.
++    Example:
++    Instruction: Tell Pat I cannot attend the lunch and wish them a good time.
++    Message: Pat, I cannot attend the lunch. Have a good time!
++
++    Instruction: Let my landlord know the sink is leaking.
++    Message: Hi, just letting you know that the sink is leaking.
++    """
++
++    private static let chineseWriteInstruction = """
++    根据指令写出可以直接发给对方的消息。使用指令的语言。不要复述或润色指令本身。保留要求表达的全部事实，不添加事实、承诺或解释。指令没有给出的姓名或细节就省略，不要写[姓名]这类占位符。只输出消息正文。
++    示例：
++    指令：告诉小陈我不能参加午餐，祝他们吃得开心。
++    消息：小陈，我不能参加午餐了，祝你们吃得开心！
++
++    指令：跟房东说一下水槽漏水了。
++    消息：您好，跟您说一下，水槽漏水了。
++    """
++
++    private static func body(
++        task: String,
++        selection: String?,
++        context: (before: String, after: String)?,
++        style: LocalAPIComposeStyle,
++        vocabulary: [String],
++        languageVariants: [String] = [],
++        styleExamples: [LocalAPIStyleExample] = [],
++        selectionPrefix: String = "Selected text:\n",
++        transcriptPrefix: String = "Speech transcript: ",
++        afterTranscript: String? = nil,
++        outputCue: String? = nil
++    ) -> String {
++        var sections = [task.trimmingCharacters(in: .whitespacesAndNewlines)]
++
++        if let selection, !selection.isEmpty, let context, (context.before + context.after).contains("\n") {
++            // Multi-line context goes before the selection, so the selection is the text next to
++            // the instruction: after it, Qwen3.5-4B rewrote a whole structured mail for "make this
++            // firmer" (3 of 3). One-line context stays after it: placed first, a
++            // "make this calmer" came back unchanged.
++            if !context.before.isEmpty {
++                sections.append("Text before the selected text (already in the field; reference only, do not edit or repeat it):\n\(context.before)")
++            }
++            if !context.after.isEmpty {
++                sections.append("Text after the selected text (already in the field; reference only, do not edit or repeat it):\n\(context.after)")
++            }
++            sections.append("\(selectionPrefix)\(selection)")
++        } else if let selection, !selection.isEmpty {
++            sections.append("\(selectionPrefix)\(selection)")
++            if let context, !context.before.isEmpty { sections.append("Text before the cursor (already in the field; do not repeat it):\n\(context.before)") }
++            if let context, !context.after.isEmpty { sections.append("Text after the cursor (already in the field; do not repeat it):\n\(context.after)") }
++        } else if let context {
++            if !context.before.isEmpty { sections.append("Text before the cursor (already in the field; do not repeat it):\n\(context.before)") }
++            if !context.after.isEmpty { sections.append("Text after the cursor (already in the field; do not repeat it):\n\(context.after)") }
++        }
++
++        let toneLine: String?
++        switch style {
++        case .automatic: toneLine = nil
++        case .formal: toneLine = "Tone: formal."
++        case .casual: toneLine = "Tone: casual."
++        case .concise: toneLine = "Tone: concise."
++        }
++        if let toneLine { sections.append(toneLine) }
++
++        if !vocabulary.isEmpty {
++            sections.append("Prefer these spellings: \(vocabulary.joined(separator: "; ")).")
++        }
++        if !languageVariants.isEmpty {
++            let namedVariants = languageVariants.map { variant in
++                "\(variant) — \(languageVariantDisplayNames[variant] ?? variant)"
++            }
++            sections.append(
++                "Preferred language variants: \(namedVariants.joined(separator: ", ")). "
++                    + "Apply these preferences only when the output already uses the corresponding language. Use its regional "
++                    + "spelling or script consistently in every word of the entire output, including words "
++                    + "that already look acceptable; do not translate because of these preferences."
++            )
++        }
++        if !styleExamples.isEmpty {
++            var lines = [
++                "Personal wording examples. Adjust phrasing only. Do not change facts, names, numbers, or the output language. Do not override the task, the target language, or the preferred spellings.",
++            ]
++            for example in styleExamples {
++                lines.append("Before: \(example.before)")
++                lines.append("After: \(example.after)")
++            }
++            sections.append(lines.joined(separator: "\n"))
++        }
++
++        sections.append("\(transcriptPrefix)\(EnhancementPromptResolver.rawTranscriptionTemplateVariable)")
++        if let afterTranscript { sections.append(afterTranscript) }
++        if let outputCue { sections.append(outputCue) }
++        return sections.joined(separator: "\n\n")
++    }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+index 6dd8751b7291a2c643ea7f45d78649031d06f11f..c0059a384c254b61d1c1045b67e7f04ede063bd7 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIDictationPipeline.swift
+@@ -20,6 +20,7 @@ struct LocalAPIDictationOutcome: Equatable {
+     var enhancementSeconds: TimeInterval?
+     var dictionaryHitTerms: [String]
+     var dictionaryCorrectedTerms: [String]
++    var mode: LocalAPIComposeMode = .dictate
+ }
+ 
+ private struct LocalAPIDictationResponseBody: Encodable {
+@@ -29,6 +30,10 @@ private struct LocalAPIDictationResponseBody: Encodable {
+     var enhanced: Bool
+     var asrMs: Int
+     var enhanceMs: Int
++    var mode: LocalAPIComposeMode = .dictate
++    /// "not_applied" when an edit could not be applied; `text` is then the unchanged selection.
++    var status: String?
++    var message: String?
+ }
+ 
+ final class LocalAPIDictationPipeline {
+@@ -43,6 +48,9 @@ final class LocalAPIDictationPipeline {
+     /// Applies dictionary corrections to the final text.
+     let finalize: (String) -> LocalAPIFinalText
+     let record: (LocalAPIDictationOutcome) -> Void
++    /// Raw transcript → mode-specific result (cleanup, translate, edit, write), using the
++    /// same selected text model through a strict path that never returns raw speech.
++    var composeHandler: ((String, LocalAPIComposeOptions) async throws -> String)?
+ 
+     private var isRunning = false
+ 
+@@ -122,6 +130,107 @@ final class LocalAPIDictationPipeline {
+             enhancementSeconds = Date().timeIntervalSince(enhancementStart)
+         }
+ 
++        return finish(
++            mode: .dictate,
++            rawText: rawText,
++            text: text,
++            usedEnhancement: usedEnhancement,
++            transcriptionSeconds: transcriptionSeconds,
++            enhancementSeconds: enhancementSeconds
++        )
++    }
++
++    /// Every compose mode requires a working text model. Dictate restores the ASR text
++    /// when cleanup changes its script; other model failures remain errors.
++    func runCompose(_ request: LocalAPIComposeRequest) async -> LocalAPIHTTPResponse {
++        if let reason = busyReason() {
++            return .error(status: 503, reason)
++        }
++        guard !isRunning else {
++            return .error(status: 503, "Voxt is still working on the previous dictation.")
++        }
++        isRunning = true
++        defer { isRunning = false }
++
++        let audioURL = temporaryDirectory.appendingPathComponent("local-api-\(UUID().uuidString).\(request.fileExtension)")
++        defer { try? FileManager.default.removeItem(at: audioURL) }
++
++        do {
++            try request.audio.write(to: audioURL, options: .atomic)
++        } catch {
++            VoxtLog.warning("Local API could not store the audio: \(error.localizedDescription)")
++            return .error(status: 500, error.localizedDescription)
++        }
++        guard isReadableAudio(audioURL) else {
++            return .error(status: 400, "The audio could not be read.")
++        }
++
++        let rawText: String
++        let transcriptionStart = Date()
++        do {
++            rawText = try await transcribe(audioURL, request.language).trimmingCharacters(in: .whitespacesAndNewlines)
++        } catch {
++            VoxtLog.warning("Local API compose transcription failed: \(error.localizedDescription)")
++            return .error(status: 500, error.localizedDescription)
++        }
++        let transcriptionSeconds = Date().timeIntervalSince(transcriptionStart)
++
++        guard !rawText.isEmpty else {
++            return .error(status: 422, "No speech detected.")
++        }
++
++        guard let composeHandler else {
++            return .error(status: 503, "No text model is available for this operation.")
++        }
++        let enhancementStart = Date()
++        let text: String
++        do {
++            let composed = try await composeHandler(rawText, request.options)
++                .trimmingCharacters(in: .whitespacesAndNewlines)
++            guard !composed.isEmpty else {
++                return .error(status: 503, "The text model returned nothing.")
++            }
++            if request.options.mode == .dictate {
++                text = LocalAPIComposePrompt.preservingDictationScript(composed, rawText: rawText)
++                if text != composed {
++                    VoxtLog.warning("Local API dictate cleanup discarded: transcript script changed.")
++                }
++            } else {
++                text = composed
++            }
++        } catch is LocalAPIComposePrompt.EditNotApplied {
++            // No dictionary finalization or history entry: the selection must remain
++            // byte-for-byte unchanged when the edit could not be applied.
++            return .json(status: 200, LocalAPIDictationResponseBody(
++                id: UUID().uuidString, text: request.options.selectedText, rawText: rawText, enhanced: false,
++                asrMs: Int(transcriptionSeconds * 1000),
++                enhanceMs: Int(Date().timeIntervalSince(enhancementStart) * 1000),
++                mode: request.options.mode, status: "not_applied", message: "Couldn't apply that edit"
++            ))
++        } catch {
++            VoxtLog.warning("Local API compose failed: \(error.localizedDescription)")
++            return .error(status: 503, error.localizedDescription)
++        }
++        let enhancementSeconds = Date().timeIntervalSince(enhancementStart)
++
++        return finish(
++            mode: request.options.mode,
++            rawText: rawText,
++            text: text,
++            usedEnhancement: true,
++            transcriptionSeconds: transcriptionSeconds,
++            enhancementSeconds: enhancementSeconds
++        )
++    }
++
++    private func finish(
++        mode: LocalAPIComposeMode,
++        rawText: String,
++        text: String,
++        usedEnhancement: Bool,
++        transcriptionSeconds: TimeInterval,
++        enhancementSeconds: TimeInterval?
++    ) -> LocalAPIHTTPResponse {
+         let final = finalize(text)
+         let outcome = LocalAPIDictationOutcome(
+             id: UUID(),
+@@ -131,7 +240,8 @@ final class LocalAPIDictationPipeline {
+             transcriptionSeconds: transcriptionSeconds,
+             enhancementSeconds: enhancementSeconds,
+             dictionaryHitTerms: final.dictionaryHitTerms,
+-            dictionaryCorrectedTerms: final.dictionaryCorrectedTerms
++            dictionaryCorrectedTerms: final.dictionaryCorrectedTerms,
++            mode: mode
+         )
+         record(outcome)
+ 
+@@ -141,7 +251,8 @@ final class LocalAPIDictationPipeline {
+             rawText: outcome.rawText,
+             enhanced: usedEnhancement,
+             asrMs: Int(transcriptionSeconds * 1000),
+-            enhanceMs: Int((enhancementSeconds ?? 0) * 1000)
++            enhanceMs: Int((enhancementSeconds ?? 0) * 1000),
++            mode: mode
+         ))
+     }
+ }
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIHTTP.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIHTTP.swift
+index 19b1bbb699616c7dc2f9f9776f0645247c9be673..e69e4bed8a35cb3a5deccd37c2cf6b5a944d2d86 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIHTTP.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIHTTP.swift
+@@ -132,3 +132,9 @@ nonisolated struct LocalAPIHTTPResponse: Equatable, Sendable {
+         }
+     }
+ }
++
++/// A failure whose message the Local API returns to the client as is.
++struct LocalAPIError: LocalizedError {
++    var message: String
++    var errorDescription: String? { message }
++}
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
+index ac054c04fce473a9777c67f87752ae50dec5f8e9..1caf1d011f9ceaafe5d1b43e9fe2590b505cf079 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIRequestHandler.swift
+@@ -43,7 +43,10 @@ nonisolated enum LocalAPIRequestHandler {
+         router: LocalAPIRouter,
+         version: String,
+         modelStatus: @escaping @MainActor @Sendable () -> LocalAPIModelStatus,
+-        dictate: @escaping @MainActor @Sendable (LocalAPIDictationRequest) async -> LocalAPIHTTPResponse
++        dictate: @escaping @MainActor @Sendable (LocalAPIDictationRequest) async -> LocalAPIHTTPResponse,
++        compose: @escaping @MainActor @Sendable (LocalAPIComposeRequest) async -> LocalAPIHTTPResponse = { _ in
++            .error(status: 503, "No text model is available for this operation.")
++        }
+     ) -> LocalAPIServer.Handler {
+         { request in
+             switch router.route(request) {
+@@ -55,17 +58,27 @@ nonisolated enum LocalAPIRequestHandler {
+                     api: .init(major: 1, minor: 0),
+                     app: "Voxt",
+                     version: version,
+-                    endpoints: ["health", "capabilities", "dictations"],
++                    endpoints: [
++                        "health",
++                        "capabilities",
++                        "dictations",
++                        "compose",
++                        "compose/prompts",
++                    ],
+                     audio: .init(
+                         contentTypes: LocalAPIRouter.audioExtensions.keys.sorted(),
+                         maxBodyBytes: router.maxBodyBytes
+                     ),
+                     models: models
+                 ))
++            case .composePrompts:
++                return .json(status: 200, ["prompts": LocalAPIComposePrompt.builtInPrompts()])
+             case let .reject(response):
+                 return response
+             case let .dictation(dictation):
+                 return await dictate(dictation)
++            case let .compose(composeRequest):
++                return await compose(composeRequest)
+             }
+         }
+     }
+diff --git a/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift b/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
+index 6a02a3d261e70752ccc5cd2da9f17709f4f3e0ff..35cd0f986e6a7663f81b2ebd8cc06d5ec867ff4d 100644
+--- a/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
++++ b/Voxt/Voxt/Core/LocalAPI/LocalAPIRouter.swift
+@@ -11,10 +11,27 @@ nonisolated struct LocalAPIDictationRequest: Equatable, Sendable {
+     var language: ASRLanguageSelection = .userSettings
+ }
+ 
++nonisolated struct LocalAPIComposeRequest: Equatable, Sendable {
++    var audio: Data
++    var fileExtension: String
++    var options: LocalAPIComposeOptions
++    var language: ASRLanguageSelection = .userSettings
++}
++
++private struct LocalAPIComposeRequestBody: Decodable {
++    var audio: String
++    var contentType: String
++    var options: LocalAPIComposeOptions
++    var language: String? = nil
++}
++
+ nonisolated enum LocalAPIRoute: Equatable, Sendable {
+     case health
+     case capabilities
++    /// The built-in compose instructions, for a client's prompt editor.
++    case composePrompts
+     case dictation(LocalAPIDictationRequest)
++    case compose(LocalAPIComposeRequest)
+     case reject(LocalAPIHTTPResponse)
+ }
+ 
+@@ -65,6 +82,43 @@ nonisolated struct LocalAPIRouter: Sendable {
+                 enhance: request.query["enhance"] != "0",
+                 language: language
+             ))
++        case "/v1/compose/prompts":
++            guard request.method == "GET" else { return .reject(.error(status: 405, "Use GET.")) }
++            return .composePrompts
++        case "/v1/compose":
++            guard request.method == "POST" else { return .reject(.error(status: 405, "Use POST.")) }
++            let mediaType = request.header("content-type")?
++                .split(separator: ";").first?
++                .trimmingCharacters(in: .whitespaces).lowercased() ?? ""
++            guard mediaType == "application/json" else {
++                return .reject(.error(status: 415, "Send application/json."))
++            }
++            let body: LocalAPIComposeRequestBody
++            do {
++                body = try JSONDecoder().decode(LocalAPIComposeRequestBody.self, from: request.body)
++            } catch let LocalAPIComposeDecoding.styleExamples(message) {
++                return .reject(.error(status: 400, message))
++            } catch {
++                return .reject(.error(status: 400, "The compose request is not valid JSON."))
++            }
++            guard let audio = Data(base64Encoded: body.audio), !audio.isEmpty else {
++                return .reject(.error(status: 400, "The request has no audio."))
++            }
++            guard let fileExtension = Self.audioExtensions[body.contentType.lowercased()] else {
++                return .reject(.error(status: 415, "Send audio/wav or audio/mp4."))
++            }
++            if let reason = body.options.validationError() {
++                return .reject(.error(status: 400, reason))
++            }
++            guard let language = Self.languageSelection(body.language) else {
++                return .reject(.error(status: 400, "Set language to auto or a language name such as English."))
++            }
++            return .compose(LocalAPIComposeRequest(
++                audio: audio,
++                fileExtension: fileExtension,
++                options: body.options,
++                language: language
++            ))
+         default:
+             return .reject(.error(status: 404, "Unknown path."))
+         }
+diff --git a/Voxt/Voxt/en.lproj/Localizable.strings b/Voxt/Voxt/en.lproj/Localizable.strings
+index 9621794a11253456e6afbb34b2226a1b5a76ecb0..48f98b5ff8bbcdf0a5a1ed3b1b12f30ac2db8914 100644
+--- a/Voxt/Voxt/en.lproj/Localizable.strings
++++ b/Voxt/Voxt/en.lproj/Localizable.strings
+@@ -1903,6 +1903,9 @@
+ "Voxt is recording on the Mac. Try again in a moment." = "Voxt is recording on the Mac. Try again in a moment.";
+ "Voxt is recording a meeting on the Mac." = "Voxt is recording a meeting on the Mac.";
+ "Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription." = "Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription.";
++"No text model is available. Choose one in Voxt Settings > Transcription." = "No text model is available. Choose one in Voxt Settings > Transcription.";
++"The selected text model is configured to skip enhancement." = "The selected text model is configured to skip enhancement.";
++"The selected text model cannot run this operation." = "The selected text model cannot run this operation.";
+ 
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences.";
+diff --git a/Voxt/Voxt/ja.lproj/Localizable.strings b/Voxt/Voxt/ja.lproj/Localizable.strings
+index 17a0fa23a4702a357b746bcb815af3d1743273db..a8883fd7d3934ced8b3592e3df309017ba30bf35 100644
+--- a/Voxt/Voxt/ja.lproj/Localizable.strings
++++ b/Voxt/Voxt/ja.lproj/Localizable.strings
+@@ -1856,6 +1856,9 @@
+ "Voxt is recording on the Mac. Try again in a moment." = "Mac で Voxt が録音中です。少し待ってから再試行してください。";
+ "Voxt is recording a meeting on the Mac." = "Mac で Voxt が会議を録音中です。";
+ "Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription." = "Apple 音声認識は録音済みの音声を文字起こしできません。Voxt 設定 > 文字起こし でローカルまたはリモートのモデルを選んでください。";
++"No text model is available. Choose one in Voxt Settings > Transcription." = "使えるテキストモデルがありません。Voxt 設定 > 文字起こし で選んでください。";
++"The selected text model is configured to skip enhancement." = "選択中のテキストモデルは補正をスキップする設定です。";
++"The selected text model cannot run this operation." = "選択中のテキストモデルではこの操作を実行できません。";
+ 
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "句読点と段落の流れを整えます。例：話し言葉の間を読みやすい文にします。";
+diff --git a/Voxt/Voxt/zh-Hans.lproj/Localizable.strings b/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
+index 5e788bbcc11797f85a506f60e01d50bdb185f3b9..44607a7222a831d88432c77a957e2759235b6bba 100644
+--- a/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
++++ b/Voxt/Voxt/zh-Hans.lproj/Localizable.strings
+@@ -1903,6 +1903,9 @@
+ "Voxt is recording on the Mac. Try again in a moment." = "Mac 上的 Voxt 正在录音，请稍后再试。";
+ "Voxt is recording a meeting on the Mac." = "Mac 上的 Voxt 正在录制会议。";
+ "Apple Speech can't transcribe recorded audio. Choose a local or remote model in Voxt Settings > Transcription." = "Apple 语音识别不能转写录好的音频。请在 Voxt 设置 > 转写 中选择本地或远程模型。";
++"No text model is available. Choose one in Voxt Settings > Transcription." = "没有可用的文本模型。请在 Voxt 设置 > 转写 中选择一个。";
++"The selected text model is configured to skip enhancement." = "所选文本模型设置为跳过增强。";
++"The selected text model cannot run this operation." = "所选文本模型无法执行此操作。";
+ 
+ /* Onboarding guide window */
+ "Add punctuation and paragraph flow. Example: spoken pauses become readable sentences." = "补全标点和段落节奏。例如：口语停顿会整理成可读句子。";
+diff --git a/Voxt/VoxtTests/LocalAPIComposePromptTests.swift b/Voxt/VoxtTests/LocalAPIComposePromptTests.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..417f13c5c133dd11a1d8eb2de4e53793ccc5a591
+--- /dev/null
++++ b/Voxt/VoxtTests/LocalAPIComposePromptTests.swift
+@@ -0,0 +1,1059 @@
++// LocalAPIComposePromptTests.swift
++// Provides Local API compose prompt-building tests for Voxt test coverage.
++
++import XCTest
++@testable import Voxt
++
++final class LocalAPIComposePromptTests: XCTestCase {
++    func testMixedDictationRetriesPreviousPromptAndPreservesBothLanguages() async throws {
++        let raw = "Tomorrow at three 开会，please bring the draft."
++        var prompts: [String] = []
++        let result = try await LocalAPIComposePrompt.compose(rawTranscription: raw, options: options(.dictate)) { prompt in
++            prompts.append(prompt)
++            return prompts.count == 1 ? "Tomorrow at three, please bring the draft." : raw
++        }
++        XCTAssertEqual(result, raw)
++        XCTAssertEqual(prompts.count, 2)
++        XCTAssertNotEqual(prompts.first, prompts.last)
++        XCTAssertTrue(prompts.last?.contains("Remove fillers, repetitions and self-corrections") == true)
++    }
++
++    func testMixedDictationFallsBackAfterOneFailedRetry() async throws {
++        let raw = "明天下午三点开会，记得带上 laptop 和充电器。"
++        var calls = 0
++        let result = try await LocalAPIComposePrompt.compose(rawTranscription: raw, options: options(.dictate)) { _ in
++            calls += 1
++            return "明天下午三点开会，记得带上电脑和充电器。"
++        }
++        XCTAssertEqual(result, raw)
++        XCTAssertEqual(calls, 2)
++    }
++
++    func testMixedDictationRetryErrorFallsBackToRawText() async throws {
++        let raw = "Please bring 文件 and the laptop."
++        var calls = 0
++        let result = try await LocalAPIComposePrompt.compose(rawTranscription: raw, options: options(.dictate)) { _ in
++            calls += 1
++            if calls == 2 { throw LocalAPIError(message: "test failure") }
++            return "Please bring documents and the laptop."
++        }
++        XCTAssertEqual(result, raw)
++        XCTAssertEqual(calls, 2)
++    }
++
++    func testMixedDictationDoesNotRetryPreservedScriptsOrPureLanguages() async throws {
++        for (raw, output) in [
++            ("Um, please bring 文件 and the laptop.", "Please bring 文件 and the laptop."),
++            ("Um, bring the laptop.", "Bring the laptop."),
++            ("嗯，带上电脑。", "带上电脑。"),
++            ("Use variable x for 中文内容。", "Use variable x for 中文内容。")
++        ] {
++            var calls = 0
++            let result = try await LocalAPIComposePrompt.compose(rawTranscription: raw, options: options(.dictate)) { _ in
++                calls += 1
++                return output
++            }
++            XCTAssertEqual(result, output)
++            XCTAssertEqual(calls, 1)
++        }
++    }
++
++    func testMixedDictationLossThresholdAndSmallScriptControls() {
++        let raw = "一二三四五六七八九十 one two three four five six seven eight nine ten"
++        XCTAssertTrue(LocalAPIComposePrompt.losesMixedDictationContent("一二 one two three", rawText: raw))
++        XCTAssertTrue(LocalAPIComposePrompt.losesMixedDictationContent("一二三 one two", rawText: raw))
++        XCTAssertFalse(LocalAPIComposePrompt.losesMixedDictationContent("一二三 one two three", rawText: raw))
++        XCTAssertFalse(LocalAPIComposePrompt.losesMixedDictationContent("English only", rawText: "English only"))
++        XCTAssertFalse(LocalAPIComposePrompt.losesMixedDictationContent("纯中文", rawText: "纯中文内容"))
++        XCTAssertFalse(LocalAPIComposePrompt.losesMixedDictationContent("中文内容", rawText: "中文内容 x"))
++        XCTAssertFalse(LocalAPIComposePrompt.losesMixedDictationContent("a name", rawText: "李 a name"))
++    }
++
++    func testMixedDictationCancellationDoesNotReturnFallback() async throws {
++        var calls = 0
++        do {
++            _ = try await LocalAPIComposePrompt.compose(rawTranscription: "Please bring 文件 and laptop.", options: options(.dictate)) { _ in
++                calls += 1
++                if calls == 2 { throw CancellationError() }
++                return "Please bring documents and laptop."
++            }
++            XCTFail("Cancellation must propagate")
++        } catch is CancellationError { }
++        XCTAssertEqual(calls, 2)
++    }
++
++    func testMixedScriptGuardDoesNotChangeExplicitTranslation() async throws {
++        var calls = 0
++        let result = try await LocalAPIComposePrompt.compose(rawTranscription: "Please bring 文件 and laptop.", options: options(.translate, targetLanguage: "en")) { _ in
++            calls += 1
++            return "Please bring documents and laptop."
++        }
++        XCTAssertEqual(result, "Please bring documents and laptop.")
++        XCTAssertEqual(calls, 1)
++    }
++
++    private func options(
++        _ mode: LocalAPIComposeMode,
++        targetLanguage: String? = nil,
++        selectedText: String = "",
++        contextBefore: String = "",
++        contextAfter: String = "",
++        style: LocalAPIComposeStyle = .automatic,
++        vocabulary: [String] = [],
++        languageVariants: [String] = [],
++        styleExamples: [LocalAPIStyleExample] = []
++    ) -> LocalAPIComposeOptions {
++        LocalAPIComposeOptions(
++            mode: mode,
++            targetLanguage: targetLanguage,
++            selectedText: selectedText,
++            contextBefore: contextBefore,
++            contextAfter: contextAfter,
++            style: style,
++            vocabulary: vocabulary,
++            languageVariants: languageVariants,
++            styleExamples: styleExamples
++        )
++    }
++
++    // MARK: Developer prompts (phone Settings > Developer > Prompts)
++
++    func testCustomPromptReplacesTheBuiltInInstructionForThatRequestOnly() throws {
++        var dictate = options(.dictate)
++        dictate.customPrompt = "Write the speech as a haiku."
++        let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: dictate, rawTranscription: "Hello there."))
++        XCTAssertTrue(prompt.hasPrefix("Write the speech as a haiku."))
++        XCTAssertTrue(prompt.contains("{{RAW_TRANSCRIPTION}}"))
++        XCTAssertFalse(prompt.contains("Clean up the transcribed speech."))
++        let builtIn = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.dictate), rawTranscription: "Hello there."))
++        XCTAssertTrue(builtIn.contains("Clean up the transcribed speech."))
++
++        var translate = options(.translate, targetLanguage: "fr")
++        translate.customPrompt = "Translate into {{TARGET_LANGUAGE}} like a pirate."
++        let pirate = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: translate, rawTranscription: "Meet at three, sorry, four."))
++        XCTAssertTrue(pirate.hasPrefix("Translate into fr like a pirate."))
++        XCTAssertFalse(pirate.contains("Corrected:"))
++
++        var edit = options(.edit, selectedText: "See you Monday.")
++        edit.customPrompt = "Apply the instruction."
++        let edited = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: edit, rawTranscription: "Make it Tuesday."))
++        XCTAssertTrue(edited.hasPrefix("Apply the instruction."))
++        XCTAssertTrue(edited.contains("See you Monday."))
++    }
++
++    func testCustomPromptKeepsTheSafetyGuards() async throws {
++        var edit = options(.edit, selectedText: "See you Monday.")
++        edit.customPrompt = "Apply the instruction."
++        var calls = 0
++        do {
++            _ = try await LocalAPIComposePrompt.compose(rawTranscription: "Make it Tuesday.", options: edit) { _ in
++                calls += 1; return "See you Monday."
++            }
++            XCTFail("an unchanged edit must not be applied")
++        } catch { XCTAssertTrue(error is LocalAPIComposePrompt.EditNotApplied) }
++        XCTAssertEqual(calls, 2)
++    }
++
++    func testCustomPromptIsDecodedTrimmedAndLengthLimited() throws {
++        func decode(_ prompt: String) throws -> LocalAPIComposeOptions {
++            try JSONDecoder().decode(LocalAPIComposeOptions.self, from: JSONSerialization.data(withJSONObject: ["mode": "dictate", "customPrompt": prompt]))
++        }
++        XCTAssertEqual(try decode("  Keep it short.  ").customPrompt, "Keep it short.")
++        XCTAssertNil(try decode("   ").customPrompt)
++        XCTAssertNil(try JSONDecoder().decode(LocalAPIComposeOptions.self, from: Data(#"{"mode":"dictate"}"#.utf8)).customPrompt)
++        XCTAssertNil(try decode(String(repeating: "a", count: 4_000)).validationError())
++        XCTAssertEqual(try decode(String(repeating: "a", count: 4_001)).validationError(), "Use a custom prompt of at most 4,000 characters.")
++    }
++
++    func testBuiltInPromptsListEveryModeForThePhoneEditor() {
++        let prompts = LocalAPIComposePrompt.builtInPrompts()
++        XCTAssertEqual(Set(prompts.keys), ["dictate", "edit", "translate", "write"])
++        XCTAssertTrue(prompts["dictate"]?.contains("Clean up the transcribed speech.") == true)
++        XCTAssertTrue(prompts["translate"]?.contains("{{TARGET_LANGUAGE}}") == true)
++        XCTAssertFalse(prompts.values.contains { $0.contains("{{RAW_TRANSCRIPTION}}") })
++    }
++
++    private let wordingExample = LocalAPIStyleExample(
++        before: "Thanks, I'll send Alice the file at 3.",
++        after: "Cheers — I'll send Alice the file at 3."
++    )
++
++    func testDictatePromptMatchesTranscriptLanguageAndIncludesCorrectionExamples() throws {
++        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.dictate), rawTranscription: "第一，保存报告；第二，发送邮件。"
++        ))
++        XCTAssertTrue(chinese.contains("整理转写的口述内容。"))
++        XCTAssertTrue(chinese.contains("带三样东西：钥匙、外套和水。"))
++        XCTAssertTrue(chinese.contains("口述：把评审改到周三——不对——周四下午三点。"))
++        XCTAssertTrue(chinese.contains("输出：把评审改到周四下午三点。"))
++        XCTAssertTrue(chinese.contains("口述转写：{{RAW_TRANSCRIPTION}}"))
++        XCTAssertFalse(chinese.contains("Clean up the transcribed speech."))
++        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.dictate), rawTranscription: "Move the review to Thursday."
++        ))
++        XCTAssertTrue(english.contains("Clean up the transcribed speech."))
++        XCTAssertTrue(english.contains("Speech: Bring three things: keys, a coat, and water."))
++        XCTAssertTrue(english.contains("Speech: Move the review to Wednesday — no wait — Thursday at three."))
++        XCTAssertTrue(english.contains("Output: Move the review to Thursday at three."))
++        XCTAssertTrue(english.contains("Speech transcript: {{RAW_TRANSCRIPTION}}"))
++    }
++
++    // A landlord email dictated as "Hi Karen, first …, second …, and also …" came back as one
++    // paragraph (EN) or as "- 第一，…" bullets with the closing merged into an item (ZH).
++    func testDictatePromptNumbersCountedPointsAndLaysOutMessages() throws {
++        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.dictate), rawTranscription: "Hi Karen, first the heater, second the window."
++        ))
++        XCTAssertTrue(english.contains("number them 1., 2., 3. on separate lines and drop the counting words"))
++        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.dictate), rawTranscription: "王先生您好，第一，暖气坏了，第二，窗户关不上。"
++        ))
++        XCTAssertTrue(chinese.contains("编号写成 1. 2. 3.，去掉“第一”“还有”等分点词"))
++        XCTAssertTrue(chinese.contains("称呼单独一行"))
++        XCTAssertTrue(chinese.contains("输出：\n李老师您好，\n\n有两件事：\n1. 报告晚交一天。\n2. 会议改到周一。\n\n您看可以吗？\n\n谢谢。"))
++    }
++
++    // Cleaned outputs of Qwen3.5-4B for dictated messages with uncounted points.
++    func testMessageWithGreetingAndThreePointsIsLaidOutWithANumberedList() {
++        XCTAssertEqual(
++            LocalAPIComposePrompt.laidOutMessage("Hi Karen, this is Lin's son, from unit 4B. Her heater stopped working Tuesday, the bedroom window won't close, and she still needs the October rent receipt. Could you send someone this week? Thanks."),
++            "Hi Karen,\n\nThis is Lin's son, from unit 4B.\n\n1. Her heater stopped working Tuesday.\n2. The bedroom window won't close.\n3. She still needs the October rent receipt.\n\nCould you send someone this week?\n\nThanks."
++        )
++        XCTAssertEqual(
++            LocalAPIComposePrompt.laidOutMessage("Hey Chris, the printer is out of toner, the wifi in the meeting room keeps dropping, and the coffee machine is leaking again. Can you take a look today? Thanks, Jo."),
++            "Hey Chris,\n\n1. The printer is out of toner.\n2. The wifi in the meeting room keeps dropping.\n3. The coffee machine is leaking again.\n\nCan you take a look today?\n\nThanks,\nJo"
++        )
++        XCTAssertEqual(
++            LocalAPIComposePrompt.laidOutMessage("王姐您好，\n\n暖气周二坏了，卧室的窗户关不上，还有十月的房租收据我还没拿到。这周能找人来看看吗？\n\n谢谢。"),
++            "王姐您好，\n\n1. 暖气周二坏了。\n2. 卧室的窗户关不上。\n3. 十月的房租收据我还没拿到。\n\n这周能找人来看看吗？\n\n谢谢。"
++        )
++        XCTAssertEqual(
++            LocalAPIComposePrompt.laidOutMessage("嗯，王姐您好，我是林阿姨的儿子，住 4B 的。\n\n那个，她家暖气周二坏了，卧室的窗户关不上，还有她还需要十月的房租收据。这周能找人来看看吗？谢谢。"),
++            "王姐您好，\n\n我是林阿姨的儿子，住 4B 的。\n\n1. 她家暖气周二坏了。\n2. 卧室的窗户关不上。\n3. 她还需要十月的房租收据。\n\n这周能找人来看看吗？\n\n谢谢。"
++        )
++    }
++
++    func testMessageWithAnExistingListGetsItsGreetingAndSignOffOnTheirOwnLines() {
++        XCTAssertEqual(
++            LocalAPIComposePrompt.laidOutMessage("大家好，说一下发布的事。\n\n1. 测试版周五发出去。\n2. 文档快写完了。\n\n有空的请告诉我，谢谢，小林。"),
++            "大家好，\n\n说一下发布的事。\n\n1. 测试版周五发出去。\n2. 文档快写完了。\n\n有空的请告诉我。\n\n谢谢，\n小林"
++        )
++        XCTAssertEqual(
++            LocalAPIComposePrompt.laidOutMessage("Email to my landlord, Hi Karen, a few things:\n1. The heater stopped working on Monday.\n2. The bedroom window won't close.\n\nCould you send someone this week? Thanks."),
++            "Email to my landlord.\n\nHi Karen,\n\nA few things:\n1. The heater stopped working on Monday.\n2. The bedroom window won't close.\n\nCould you send someone this week?\n\nThanks."
++        )
++    }
++
++    func testMessageLayoutLeavesTextWithoutAGreetingAndAListUnchanged() {
++        for text in [
++            "Hi Karen, the heater stopped working on Tuesday, so it's pretty cold in here. Could you send someone this week? Thanks.",
++            "Hi Mom, I'm home now. See you tomorrow.",
++            "We arrive at ten, check in at noon, and leave at five.",
++            "Hi Sam, I bought apples, milk, and bread.",
++            "王姐您好，暖气周二坏了，所以屋里挺冷的。这周能找人来看看吗？谢谢。",
++            "明天的火车八点出发，九点到达。我会提前到车站等你。",
++            "This was my first visit to that bookstore. It was quiet, and I would like to go again next week.",
++        ] {
++            XCTAssertEqual(LocalAPIComposePrompt.laidOutMessage(text), text)
++        }
++    }
++
++    // Qwen3-ASR wrote "Monday. Ah, sorry Tuesday" for "Monday, uh, sorry, Tuesday",
++    // and Dictate cleanup then kept both days.
++    func testSelfCorrectionsAcrossAFillerOrAFullStopBeforeSorry() {
++        XCTAssertEqual(
++            LocalAPIComposePrompt.appliedSelfCorrections("So her heater stopped working Monday. Ah, sorry Tuesday, the bedroom window won't close."),
++            "So her heater stopped working Tuesday, the bedroom window won't close."
++        )
++        XCTAssertEqual(
++            LocalAPIComposePrompt.appliedSelfCorrections("the heater stopped working Monday, uh, sorry, Tuesday, the window"),
++            "the heater stopped working Tuesday, the window"
++        )
++        XCTAssertEqual(LocalAPIComposePrompt.appliedSelfCorrections("暖气周一，呃，不对，周二坏了"), "暖气周二坏了")
++        for unchanged in ["We arrive Monday. Actually, Tuesday works better for Sam.", "We arrive at ten. Actually, bring a coat.",
++                          "I'm sorry, Tuesday is full."] {
++            XCTAssertEqual(LocalAPIComposePrompt.appliedSelfCorrections(unchanged), unchanged)
++        }
++    }
++
++    func testDictateAppliesAKeptSelfCorrectionAndDropsAStraySoBeforeLayingOut() async throws {
++        let cleaned = "Hi Karen. So her heater stopped working Monday. Ah, sorry, Tuesday, the bedroom window won't close, and she still needs the October rent receipt. Thanks."
++        let result = try await LocalAPIComposePrompt.compose(rawTranscription: "Um, " + cleaned, options: options(.dictate)) { _ in cleaned }
++        XCTAssertEqual(result, "Hi Karen,\n\n1. Her heater stopped working Tuesday.\n2. The bedroom window won't close.\n3. She still needs the October rent receipt.\n\nThanks.")
++    }
++
++    // Qwen3.5-4B wrote counted points as "First, …\n- Second, …" and "- 第一，…".
++    func testCountedLinesBecomeANumberedList() {
++        XCTAssertEqual(
++            LocalAPIComposePrompt.numberedCountedLines("First, save the report.\n- Second, send the email.\n- Third, close the window."),
++            "1. Save the report.\n2. Send the email.\n3. Close the window."
++        )
++        XCTAssertEqual(
++            LocalAPIComposePrompt.numberedCountedLines("明天出发之前：\n- 第一，带好护照\n- 第二，今晚把手机充满电\n- 还有，早上七点在车站集合"),
++            "明天出发之前：\n1. 带好护照\n2. 今晚把手机充满电\n3. 早上七点在车站集合"
++        )
++        for unchanged in ["First, I want to thank you.\nThe office is open.", "Bring three things:\n- keys\n- a coat", "This was my first visit.",
++                          "Second, send it.\nThird, close it."] {
++            XCTAssertEqual(LocalAPIComposePrompt.numberedCountedLines(unchanged), unchanged)
++        }
++    }
++
++    func testCountedPointsInsideAParagraphBecomeANumberedList() {
++        XCTAssertEqual(
++            LocalAPIComposePrompt.numberedCountedLines("Okay, for tomorrow's trip, first, bring your passport, second, charge your phone tonight, and third, we meet at the station at seven."),
++            "Okay, for tomorrow's trip:\n1. Bring your passport.\n2. Charge your phone tonight.\n3. We meet at the station at seven."
++        )
++        XCTAssertEqual(
++            LocalAPIComposePrompt.numberedCountedLines("Hi Mark, I'm writing about a few problems. First, the sink is leaking. Second, the heater doesn't turn on, and also, the lock keeps sticking. Could you send someone? Thanks, Alex."),
++            "Hi Mark, I'm writing about a few problems.\n\n1. The sink is leaking.\n2. The heater doesn't turn on.\n3. The lock keeps sticking.\n\nCould you send someone? Thanks, Alex."
++        )
++        XCTAssertEqual(
++            LocalAPIComposePrompt.numberedCountedLines("大家好，说一下发布的事。第一，测试版周五发出去，第二，文档快写完了，还有，安卓版本还需要有人测一下。有空的请告诉我。"),
++            "大家好，说一下发布的事。\n\n1. 测试版周五发出去。\n2. 文档快写完了。\n3. 安卓版本还需要有人测一下。\n\n有空的请告诉我。"
++        )
++        for unchanged in ["This was my first visit to that bookstore. It was quiet.", "First, I want to thank you. The office is open.",
++                          "I also need the first draft, and the second one."] {
++            XCTAssertEqual(LocalAPIComposePrompt.numberedCountedLines(unchanged), unchanged)
++        }
++        XCTAssertEqual(
++            LocalAPIComposePrompt.laidOutMessage("Hi Karen, so, the heater stopped working Tuesday, the bedroom window won't close, and I still need the receipt. Thanks."),
++            "Hi Karen,\n\n1. The heater stopped working Tuesday.\n2. The bedroom window won't close.\n3. I still need the receipt.\n\nThanks."
++        )
++    }
++
++    // Qwen3-ASR joined the context sentence to the points with ", so".
++    func testPointsAfterASoClauseSplitOffTheClauseBeforeThem() {
++        XCTAssertEqual(
++            LocalAPIComposePrompt.laidOutMessage("Hi Karen, I'm writing for my mom Grace in Unit 4B, so her heater stopped working Tuesday, the bedroom window won't close, and she still needs the October rent receipt. Could you send someone this week? Thanks."),
++            "Hi Karen,\n\nI'm writing for my mom Grace in Unit 4B.\n\n1. Her heater stopped working Tuesday.\n2. The bedroom window won't close.\n3. She still needs the October rent receipt.\n\nCould you send someone this week?\n\nThanks."
++        )
++        let twoParts = "Hi Karen, the heater stopped working on Tuesday, so it's pretty cold in here, and the window is stuck too. Thanks."
++        XCTAssertEqual(LocalAPIComposePrompt.laidOutMessage(twoParts), twoParts)
++    }
++
++    // Qwen3.5-4B returned the whole email with only the selected sentence changed.
++    func testEditThatReturnsTheFieldAroundTheSelectionKeepsOnlyTheEditedSelection() async throws {
++        let before = "Hi Karen,\n\n1. Her heater stopped working Tuesday.\n2. The bedroom window won't close.\n\n"
++        let after = "\n\nThanks."
++        let result = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this firmer but polite.",
++            options: options(.edit, selectedText: "Could you send someone this week?", contextBefore: before, contextAfter: after)
++        ) { _ in "Hi Karen,\n\n1. Her heater stopped working Tuesday.\n2. The bedroom window won't close.\n\nPlease send someone this week.\n\nThanks." }
++        XCTAssertEqual(result, "Please send someone this week.")
++    }
++
++    // With the whole structured mail after the selection, Qwen3.5-4B rewrote the whole mail for
++    // "make this firmer but polite" (3 of 3 tries).
++    func testEditPromptPutsTheFieldBeforeTheSelectionNextToTheInstruction() throws {
++        let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "Could you send someone this week?",
++                         contextBefore: "Hi Karen,\n\n1. Her heater stopped working Tuesday.\n\n", contextAfter: "\n\nThanks."),
++            rawTranscription: "Make this firmer but polite."
++        ))
++        let before = try XCTUnwrap(prompt.range(of: "Text before the selected text"))
++        let after = try XCTUnwrap(prompt.range(of: "Text after the selected text"))
++        let selection = try XCTUnwrap(prompt.range(of: "Selected text: Could you send someone this week?\n\nInstruction: {{RAW_TRANSCRIPTION}}"))
++        XCTAssertLessThan(before.lowerBound, selection.lowerBound)
++        XCTAssertLessThan(after.lowerBound, selection.lowerBound)
++    }
++
++    // "make this firmer but polite" added "Thank you." before the mail's "Thanks.".
++    func testEditDropsAnAddedClosingThatTheFieldAlreadyHasRightAfterTheSelection() async throws {
++        let edit = "Please arrange for someone to be sent over this week. Thank you."
++        let mail = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this firmer but polite.",
++            options: options(.edit, selectedText: "Could you send someone this week?",
++                             contextBefore: "Hi Karen,\n\n1. Her heater stopped working Tuesday.\n\n", contextAfter: "\n\nThanks.")
++        ) { _ in edit }
++        XCTAssertEqual(mail, "Please arrange for someone to be sent over this week.")
++        let zh = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "语气坚定一点。", options: options(.edit, selectedText: "这周能找人来看看吗？", contextAfter: "\n\n谢谢。")
++        ) { _ in "请这周务必派人来看一下。谢谢！" }
++        XCTAssertEqual(zh, "请这周务必派人来看一下。")
++        let noClosingAfter = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this more polite.", options: options(.edit, selectedText: "Send me the slides today.")
++        ) { _ in "Could you please send me the slides today? Thank you!" }
++        XCTAssertEqual(noClosingAfter, "Could you please send me the slides today? Thank you!")
++    }
++
++    // "make this shorter" on "2. The bedroom window …" dropped the "2.", the
++    // date/time guard read "2" as a time and forced a retry that returned the line unchanged.
++    func testEditOfAListItemEditsTheTextAndKeepsTheMarker() async throws {
++        var prompts: [String] = []
++        let item = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this shorter.",
++            options: options(.edit, selectedText: "2. The bedroom window in the back room won't close properly anymore.",
++                             contextBefore: "Hi Karen,\n\n1. Her heater stopped working Tuesday.\n", contextAfter: "\n3. She still needs the receipt.")
++        ) { prompt in prompts.append(prompt); return "The bedroom window won't close." }
++        XCTAssertEqual(item, "2. The bedroom window won't close.")
++        XCTAssertEqual(prompts.count, 1)
++        XCTAssertTrue(prompts[0].contains("Selected text: The bedroom window in the back room won't close properly anymore."))
++        let keptMarker = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this shorter.", options: options(.edit, selectedText: "- The bedroom window in the back room won't close properly anymore.")
++        ) { _ in "- The bedroom window won't close." }
++        XCTAssertEqual(keptMarker, "- The bedroom window won't close.")
++        let time = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this shorter.", options: options(.edit, selectedText: "We meet at 2 tomorrow in the big room downstairs.")
++        ) { _ in "We meet at 2 tomorrow downstairs." }
++        XCTAssertEqual(time, "We meet at 2 tomorrow downstairs.")
++    }
++
++    func testDictateReturnsTheLaidOutMessage() async throws {
++        let cleaned = "Hi Karen, the heater stopped working Tuesday, the bedroom window won't close, and I still need the October rent receipt. Thanks."
++        let result = try await LocalAPIComposePrompt.compose(rawTranscription: "Um, hi Karen, " + cleaned.dropFirst(10), options: options(.dictate)) { _ in cleaned }
++        XCTAssertEqual(result, "Hi Karen,\n\n1. The heater stopped working Tuesday.\n2. The bedroom window won't close.\n3. I still need the October rent receipt.\n\nThanks.")
++    }
++
++    func testWritePromptUsesInstructionLanguageAndSameLanguageMessageExample() throws {
++        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.write), rawTranscription: "告诉同事我会晚到十分钟，请他们先开始。"
++        ))
++        XCTAssertTrue(chinese.contains("根据指令写出可以直接发给对方的消息。"))
++        XCTAssertTrue(chinese.contains("消息：小陈，我不能参加午餐了，祝你们吃得开心！"))
++        XCTAssertTrue(chinese.contains("指令：{{RAW_TRANSCRIPTION}}"))
++        XCTAssertFalse(chinese.contains("Speech transcript:"))
++        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.write), rawTranscription: "Thank Alex for the notes."
++        ))
++        XCTAssertTrue(english.contains("Write the actual message requested by the instruction"))
++        XCTAssertTrue(english.contains("Message: Pat, I cannot attend the lunch. Have a good time!"))
++        XCTAssertTrue(english.contains("Instruction: {{RAW_TRANSCRIPTION}}"))
++        XCTAssertFalse(english.contains("Speech transcript:"))
++    }
++
++    func testEditPromptMatchesSelectionLanguageAndKeepsUnrequestedDetails() throws {
++        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "我们明天下午三点在会议室开会。"),
++            rawTranscription: "简短一点。"
++        ))
++        XCTAssertTrue(chinese.contains("要求缩短或改变语气等整段修改时"))
++        XCTAssertTrue(chinese.contains("同音词错误"))
++        XCTAssertTrue(chinese.contains("选中文字：我们明天下午三点在会议室开会。"))
++        XCTAssertTrue(chinese.contains("指令：{{RAW_TRANSCRIPTION}}"))
++        XCTAssertTrue(chinese.hasSuffix("输出："))
++        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "Can we meet Thursday at three?"),
++            rawTranscription: "Actually make it Friday."
++        ))
++        XCTAssertTrue(english.contains("For a whole-text change such as shortening or changing tone"))
++        XCTAssertTrue(english.contains("sound-alike errors"))
++        XCTAssertTrue(english.contains("Output: The workshop is on Wednesday at noon."))
++        XCTAssertTrue(english.contains("Selected text: Can we meet Thursday at three?"))
++        XCTAssertTrue(english.contains("Instruction: {{RAW_TRANSCRIPTION}}"))
++        XCTAssertTrue(english.hasSuffix("Output:"))
++    }
++
++    func testUnchangedEditRetriesOnceUnlessNoChangeWasRequested() async throws {
++        let selection = "Can we meet Thursday at three?"
++        var prompts: [String] = []
++        let changed = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "actually make it Friday",
++            options: options(.edit, selectedText: selection)
++        ) { prompt in
++            prompts.append(prompt)
++            return prompts.count == 1 ? selection : "Can we meet Friday at three?"
++        }
++        XCTAssertEqual(changed, "Can we meet Friday at three?")
++        XCTAssertEqual(prompts.count, 2)
++        XCTAssertTrue(prompts[1].contains("The first attempt did not safely apply the edit"))
++        prompts.removeAll()
++        let unchanged = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "leave this unchanged",
++            options: options(.edit, selectedText: selection)
++        ) { prompt in
++            prompts.append(prompt)
++            return selection
++        }
++        XCTAssertEqual(unchanged, selection)
++        XCTAssertEqual(prompts.count, 1)
++    }
++
++    func testEditRejectsInstructionFragmentAndRetriesOnlyOnce() async throws {
++        let selection = "The server has a cash limit."
++        for bad in ["The server has a cash to cash limit.", "The server has a cash-to-cash limit."] {
++            var calls = 0
++            let result = try await LocalAPIComposePrompt.compose(
++                rawTranscription: "Fix cash to cash.", options: options(.edit, selectedText: selection)
++            ) { _ in calls += 1; return calls == 1 ? bad : "The server has a cache limit." }
++            XCTAssertEqual(result, "The server has a cache limit.")
++            XCTAssertEqual(calls, 2)
++            calls = 0
++            do {
++                _ = try await LocalAPIComposePrompt.compose(
++                    rawTranscription: "Fix cash to cash.", options: options(.edit, selectedText: selection)
++                ) { _ in calls += 1; return bad }
++                XCTFail("unsafe second attempt must report not_applied")
++            } catch { XCTAssertEqual(error.localizedDescription, "Couldn't apply that edit") }
++            XCTAssertEqual(calls, 2)
++        }
++    }
++
++    func testEditKeepsExistingFragmentAndAllowsRequestedReplacement() async throws {
++        for (selection, instruction, output) in [
++            ("Compare cash to cash accounts.", "Make this polite.", "Please compare cash to cash accounts."),
++            ("The meeting is on Tuesday.", "Change Tuesday to Friday.", "The meeting is on Friday."),
++            ("请保护消费者的权利。", "把权利改成权利。", "请保护消费者的权力。")
++        ] {
++            var calls = 0
++            let result = try await LocalAPIComposePrompt.compose(rawTranscription: instruction,
++                options: options(.edit, selectedText: selection)) { _ in calls += 1; return output }
++            XCTAssertEqual(result, output)
++            XCTAssertEqual(calls, 1)
++        }
++    }
++
++    func testPlainDictateAlsoGetsTheCleanupPrompt() {
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.dictate))!
++        XCTAssertTrue(prompt.contains("Clean up"), "even a default compose dictate asks for cleanup")
++        XCTAssertTrue(prompt.contains("fillers"))
++        XCTAssertTrue(prompt.contains("Do not add"), "cleanup must not invent content")
++        XCTAssertTrue(prompt.contains(EnhancementPromptResolver.rawTranscriptionTemplateVariable))
++        XCTAssertFalse(prompt.contains("Tone:"), "automatic style adds no tone line")
++        XCTAssertFalse(prompt.contains("Prefer these spellings"))
++        XCTAssertFalse(prompt.contains("Text before the cursor"))
++    }
++
++    func testDictatePromptPreservesSpokenLanguageWithoutVariants() {
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.dictate))!
++        XCTAssertTrue(prompt.contains("Do not translate"), "dictate must never translate")
++        XCTAssertTrue(prompt.lowercased().contains("mixes languages"), "mixed-language speech keeps its language mix")
++        XCTAssertTrue(prompt.contains("original spoken language"))
++    }
++
++    func testDictateWithOptionsBuildsACleanupPrompt() {
++        let prompt = LocalAPIComposePrompt.instruction(
++            for: options(.dictate, contextBefore: "Dear team,", style: .formal, vocabulary: ["SGLang"])
++        )!
++        XCTAssertTrue(prompt.contains("Clean up"), "option-carrying dictate asks for cleanup")
++        XCTAssertTrue(prompt.contains("fillers"), "cleanup names fillers and repetitions")
++        XCTAssertFalse(prompt.contains("Dear team,"), "plain cleanup gets no cursor context")
++        XCTAssertTrue(prompt.contains("formal"))
++        XCTAssertTrue(prompt.contains("SGLang"))
++        XCTAssertTrue(prompt.contains("Do not add"), "cleanup must not invent content")
++        XCTAssertTrue(prompt.contains(EnhancementPromptResolver.rawTranscriptionTemplateVariable))
++    }
++
++    func testEditPromptUsesSurroundingContext() {
++        let prompt = LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "the sentence", contextBefore: "Dear team,", contextAfter: "Best regards")
++        )!
++        XCTAssertTrue(prompt.contains("Dear team,"), "edit keeps the text before the cursor")
++        XCTAssertTrue(prompt.contains("Best regards"), "edit keeps the text after the cursor")
++    }
++
++    func testTranslatePromptNamesLanguageAndEmbedsSpeech() {
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.translate, targetLanguage: "zh-Hans"))!
++        XCTAssertTrue(prompt.contains("zh-Hans"), "translate prompt names the target language")
++        XCTAssertTrue(prompt.contains(EnhancementPromptResolver.rawTranscriptionTemplateVariable))
++        XCTAssertTrue(prompt.contains("only the translation"))
++    }
++
++    func testTranslatePromptCleansFillersWithoutDroppingMeaning() {
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.translate, targetLanguage: "en"))!
++        XCTAssertTrue(prompt.contains("fillers"), "translate must clean fillers, not translate them")
++        XCTAssertTrue(prompt.contains("self-corrections"))
++        XCTAssertTrue(prompt.lowercased().contains("preserve meaning"), "cleanup must not drop intended meaning")
++    }
++
++    func testEditPromptEmbedsSelectionAndInstruction() {
++        let prompt = LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "the original sentence")
++        )!
++        XCTAssertTrue(prompt.contains("the original sentence"), "edit prompt carries the selected text")
++        XCTAssertTrue(prompt.contains(EnhancementPromptResolver.rawTranscriptionTemplateVariable))
++        XCTAssertFalse(prompt.contains("Selected text: \n"))
++    }
++
++    func testWritePromptCarriesContextAroundTheInstruction() {
++        let prompt = LocalAPIComposePrompt.instruction(
++            for: options(.write, contextBefore: "Dear team,", contextAfter: "Best regards")
++        )!
++        XCTAssertTrue(prompt.contains("Dear team,"))
++        XCTAssertTrue(prompt.contains("Best regards"))
++        XCTAssertTrue(prompt.contains(EnhancementPromptResolver.rawTranscriptionTemplateVariable))
++    }
++
++    // MARK: Tone edits, translated self-corrections and Write placeholders
++
++    func testEditPromptShowsAWholeTextToneChangeInBothLanguages() throws {
++        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "You never listen to me."), rawTranscription: "Make this calmer."
++        ))
++        XCTAssertTrue(english.contains("Instruction: Make this friendlier."))
++        XCTAssertTrue(english.contains("A tone or length instruction always changes the wording"))
++        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "你从来不听我说话。"), rawTranscription: "语气缓和一点。"
++        ))
++        XCTAssertTrue(chinese.contains("指令：语气友好一点。"))
++        XCTAssertTrue(chinese.contains("要求改变语气或长度时，必须改写措辞"))
++    }
++
++    func testUnchangedToneEditRetryAsksForADifferentWording() async throws {
++        let selection = "You never listen to me. I'm done talking about this tonight."
++        var prompts: [String] = []
++        let result = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this calmer.", options: options(.edit, selectedText: selection, contextBefore: selection)
++        ) { prompt in
++            prompts.append(prompt)
++            return prompts.count == 1 ? selection : "I don't feel heard, and I'd like to stop talking about this tonight."
++        }
++        XCTAssertEqual(result, "I don't feel heard, and I'd like to stop talking about this tonight.")
++        XCTAssertEqual(prompts.count, 2)
++        XCTAssertTrue(prompts[1].contains("it returned the selected text unchanged"))
++        XCTAssertFalse(prompts[1].contains("never the replacement instruction"), "an unchanged result is not instruction leakage")
++    }
++
++    func testEditPromptOmitsContextThatOnlyRepeatsTheSelection() throws {
++        let selection = "You never listen to me. I'm done talking about this tonight."
++        let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: selection, contextBefore: selection)
++        ))
++        XCTAssertFalse(prompt.contains("Text before the cursor"))
++        let longer = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "tonight.", contextBefore: "I'm done talking about this tonight.")
++        ))
++        XCTAssertTrue(longer.contains("Text before the cursor (already in the field; do not repeat it):\nI'm done talking about this tonight."))
++    }
++
++    func testTranslatePromptAppliesSelfCorrectionsWithATargetLanguageExample() throws {
++        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.translate, targetLanguage: "zh-Hans")))
++        XCTAssertTrue(chinese.contains("keep only the corrected detail"))
++        XCTAssertTrue(chinese.contains("Speech transcript: Call Sam on Monday, actually Tuesday, at ten."))
++        XCTAssertTrue(chinese.contains("Translation: 周二十点给Sam打电话。"))
++        XCTAssertTrue(chinese.hasSuffix("Translation:"))
++        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.translate, targetLanguage: "en")))
++        XCTAssertTrue(english.contains("Speech transcript: 周一，不对，周二上午十点给小陈打电话。"))
++        XCTAssertTrue(english.contains("Translation: Call Xiao Chen on Tuesday at 10 a.m."))
++        let japanese = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.translate, targetLanguage: "ja")))
++        XCTAssertTrue(japanese.contains("keep only the corrected detail"))
++        XCTAssertFalse(japanese.contains("Call Sam"), "no example in a language other than the target")
++        XCTAssertFalse(japanese.contains("Example:"))
++    }
++
++    func testTranslateWithACorrectionCueWritesTheCorrectedLineFirstAndReturnsOnlyTheTranslation() async throws {
++        var prompts: [String] = []
++        let corrected = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Pick me up at the station... no, at the airport.",
++            options: options(.translate, targetLanguage: "zh-Hans")
++        ) { prompt in
++            prompts.append(prompt)
++            return "Corrected: Pick me up at the airport.\nTranslation: 到机场接我。"
++        }
++        XCTAssertEqual(corrected, "到机场接我。")
++        XCTAssertTrue(prompts.last?.hasSuffix("Corrected:") == true)
++        prompts.removeAll()
++        let plain = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "I'll be there at five.", options: options(.translate, targetLanguage: "zh-Hans")
++        ) { prompt in
++            prompts.append(prompt)
++            return "我五点到。"
++        }
++        XCTAssertEqual(plain, "我五点到。")
++        XCTAssertFalse(prompts.last?.contains("Corrected:") == true)
++        XCTAssertNil(LocalAPIComposePrompt.translationAfterCorrection("我五点到。"))
++        XCTAssertEqual(LocalAPIComposePrompt.translationAfterCorrection("Corrected: Meet at four.\n\nTranslation:\n四点见。"), "四点见。")
++    }
++
++    /// Qwen3.5-4B kept 三点 for "three, sorry, four" even with the two-step prompt.
++    func testNumberAndDayCorrectionsAreAppliedBeforeTranslating() {
++        let cases: [(String, String)] = [
++            ("Call me at three, sorry, four o'clock.", "Call me at four o'clock."),
++            ("Book a table for six, I mean, eight people.", "Book a table for eight people."),
++            ("Mom, your checkup is on Thursday... actually, Friday. I'll drive you.", "Mom, your checkup is on Friday. I'll drive you."),
++            ("Meet at 3, no, 4 pm.", "Meet at 4 pm."),
++            ("明天上午九点，不对，十点开会。", "明天上午十点开会。"),
++            ("周一，不对，周二给小陈打电话。", "周二给小陈打电话。"),
++        ]
++        for (input, expected) in cases {
++            XCTAssertEqual(LocalAPIComposePrompt.appliedSelfCorrections(input), expected, input)
++        }
++        for unchanged in ["Actually, I like the blue one better.", "Call me at three, sorry, I'm running late.",
++                          "Pick me up at the station... no, at the airport.", "这个答案不对。"] {
++            XCTAssertEqual(LocalAPIComposePrompt.appliedSelfCorrections(unchanged), unchanged, unchanged)
++        }
++    }
++
++    /// Qwen3.5-4B turned "Book a table for eight people" into 预订一个能容纳八人的包间 (a private room nobody asked for).
++    func testTranslatePromptForbidsAddedDetails() throws {
++        let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(for: options(.translate, targetLanguage: "zh-Hans"), rawTranscription: "Book a table for eight people."))
++        XCTAssertTrue(prompt.contains("Translate only what was said: add no places, rooms, times, reasons or other details"))
++    }
++
++    func testCorrectedTranslationIsReturnedFromTheFirstCall() async throws {
++        var calls = 0
++        let result = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Call me at three, sorry, four o'clock.", options: options(.translate, targetLanguage: "zh-Hans")
++        ) { _ in calls += 1; return "四点给我打电话。" }
++        XCTAssertEqual(result, "四点给我打电话。")
++        XCTAssertEqual(calls, 1)
++    }
++
++    func testTranslatePromptCarriesTheCorrectedTranscript() throws {
++        let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.translate, targetLanguage: "zh-Hans"), rawTranscription: "Call me at three, sorry, four o'clock."))
++        XCTAssertTrue(prompt.contains("Original speech (reference only; do not translate it): {{RAW_TRANSCRIPTION}}"))
++        XCTAssertTrue(prompt.contains("Translate this corrected transcript: Call me at four o'clock."))
++        XCTAssertTrue(prompt.hasSuffix("Translation:"))
++        XCTAssertFalse(prompt.hasSuffix("Corrected:"))
++    }
++
++    func testCorrectionCues() {
++        for text in ["Thursday... actually, Friday.", "three, sorry, four", "six, I mean, eight", "the station... no, the airport", "周一，不对，周二", "九点，其实是十点"] {
++            XCTAssertTrue(LocalAPIComposePrompt.containsCorrectionCue(text), text)
++        }
++        for text in ["I'll be there at five.", "Say no to Friday's call.", "我五点到。", "Nobody knows."] {
++            XCTAssertFalse(LocalAPIComposePrompt.containsCorrectionCue(text), text)
++        }
++    }
++
++    func testToneEditThatDropsADateOrTimeRetriesNamingItThenRefuses() async throws {
++        let selection = "You never listen to me. I'm done talking about this tonight."
++        var prompts: [String] = []
++        let kept = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this calmer.", options: options(.edit, selectedText: selection)
++        ) { prompt in
++            prompts.append(prompt)
++            return prompts.count == 1 ? "Let's talk about this tomorrow." : "I'd rather not keep talking about this tonight."
++        }
++        XCTAssertEqual(kept, "I'd rather not keep talking about this tonight.")
++        XCTAssertEqual(prompts.count, 2)
++        XCTAssertTrue(prompts[1].contains("Keep \"tonight\""))
++        var calls = 0
++        do {
++            _ = try await LocalAPIComposePrompt.compose(
++                rawTranscription: "Make this calmer.", options: options(.edit, selectedText: selection)
++            ) { _ in calls += 1; return "Let's talk about this tomorrow." }
++            XCTFail("an edit that silently changes a time must not be inserted")
++        } catch { XCTAssertTrue(error is LocalAPIComposePrompt.EditNotApplied) }
++        XCTAssertEqual(calls, 2)
++        calls = 0
++        let moved = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Change tonight to tomorrow.", options: options(.edit, selectedText: selection)
++        ) { _ in calls += 1; return "You never listen to me. I'm done talking about this tomorrow." }
++        XCTAssertEqual(moved, "You never listen to me. I'm done talking about this tomorrow.")
++        XCTAssertEqual(calls, 1)
++        XCTAssertEqual(LocalAPIComposePrompt.missingDateOrTimeTerms("说得客气一点", selection: "周五之前把合同发给我。", output: "请在周五前把合同发给我。"), [])
++        XCTAssertEqual(LocalAPIComposePrompt.missingDateOrTimeTerms("说得客气一点", selection: "周五下午3点之前发给我。", output: "请尽快发给我。"), ["周五", "下午", "3点"])
++    }
++
++    // MARK: Cursor context leakage
++
++    private let notesLine = "好，先记一句：明天交报告。"
++    private let notesSpeech = "嗯，我想一下下周的安排。这个事情，我觉得是这样的：就是周一先把设计稿定下来，对吧？然后周二周三写代码，周四给测试组看一下。最主要的是周五之前要能发一个可以用的版本，不然下周的评审就来不及了。"
++
++    func testDictateThatRepeatsTextBeforeTheCursorRetriesOnceThenReturnsTheTranscript() async throws {
++        // The output began with the previous insertion, which was the text before the cursor.
++        let leaked = notesLine + "\n\n" + notesSpeech
++        var prompts: [String] = []
++        let fixed = try await LocalAPIComposePrompt.compose(
++            rawTranscription: notesSpeech, options: options(.dictate, contextBefore: "\n" + notesLine)
++        ) { prompt in
++            prompts.append(prompt)
++            return prompts.count == 1 ? leaked : notesSpeech
++        }
++        XCTAssertEqual(fixed, notesSpeech)
++        XCTAssertEqual(prompts.count, 2)
++        XCTAssertTrue(prompts.last?.contains("第一次输出重复了输入框里已有的文字") == true)
++        var calls = 0
++        let raw = try await LocalAPIComposePrompt.compose(
++            rawTranscription: notesSpeech, options: options(.dictate, contextBefore: "\n" + notesLine)
++        ) { _ in calls += 1; return leaked }
++        XCTAssertEqual(raw, notesSpeech, "a second leak falls back to the transcript instead of duplicating the field")
++        XCTAssertEqual(calls, 2)
++        // The last sentence of the earlier insertion came back before the new speech.
++        calls = 0
++        let earlier = "呃，说实话，我还没想好。我觉得这个，先这样吧。"
++        let speech = "行，我再补充一点，好，那再补充一点，就就这些可以吗？先这样。"
++        _ = try await LocalAPIComposePrompt.compose(rawTranscription: speech, options: options(.dictate, contextBefore: earlier)) { _ in
++            calls += 1
++            return calls == 1 ? "我觉得这个，先这样吧。\n行，我再补充一点，好，那再补充一点，就就这些可以吗？先这样。" : "行，我再补充一点，就这些可以吗？先这样。"
++        }
++        XCTAssertEqual(calls, 2)
++    }
++
++    func testDictateKeepsASentenceTheSpeakerReallyRepeated() async throws {
++        var calls = 0
++        let result = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "好，先记一句：明天交报告。再说一遍。", options: options(.dictate, contextBefore: notesLine)
++        ) { _ in calls += 1; return "好，先记一句：明天交报告。再说一遍。" }
++        XCTAssertEqual(result, "好，先记一句：明天交报告。再说一遍。")
++        XCTAssertEqual(calls, 1)
++    }
++
++    func testEditThatRepeatsTheSelectionOrCopiesSurroundingTextIsNotApplied() async throws {
++        // "Edit latest" over that insertion returned the note about 2.5 times.
++        let selection = notesLine + "\n\n" + notesSpeech
++        let repeated = selection + "\n\n" + selection + "\n\n" + notesLine + "\n\n嗯，我想一下下周的安排。这个事情，我觉得是这样的："
++        XCTAssertTrue(LocalAPIComposePrompt.leaksContext(repeated, rawTranscription: "简短一点。", options: options(.edit, selectedText: selection, contextBefore: "\n" + notesLine)))
++        var calls = 0
++        do {
++            _ = try await LocalAPIComposePrompt.compose(
++                rawTranscription: "简短一点。", options: options(.edit, selectedText: selection, contextBefore: "\n" + notesLine)
++            ) { _ in calls += 1; return repeated }
++            XCTFail("a repeated note must not replace the selection")
++        } catch { XCTAssertTrue(error is LocalAPIComposePrompt.EditNotApplied) }
++        XCTAssertEqual(calls, 2)
++        calls = 0
++        var prompts: [String] = []
++        let english = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Make this more polite.",
++            options: options(.edit, selectedText: "Send me the slides today.", contextBefore: "Hi Sam. I hope your trip went well. ")
++        ) { prompt in
++            prompts.append(prompt)
++            // Not the exact text before the selection, so it is not unwrapped: the leak retry runs.
++            return prompts.count == 1 ? "Hi Sam! I hope your trip went well. Could you please send me the slides today?" : "Could you please send me the slides today?"
++        }
++        XCTAssertEqual(english, "Could you please send me the slides today?")
++        XCTAssertTrue(prompts.last?.contains("Output only the edited selected text, once") == true)
++    }
++
++    func testCursorContextIsMarkedAsAlreadyInTheField() throws {
++        let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.edit, selectedText: "明天交报告。", contextBefore: notesLine), rawTranscription: "简短一点。"
++        ))
++        XCTAssertTrue(prompt.contains("Text before the cursor (already in the field; do not repeat it):\n" + notesLine))
++    }
++
++    /// With cursor context, Qwen3.5-4B copied it into 4 of 6 dictations (retried, up to 15 s);
++    /// without it, 6 of 6 passed in one call.
++    func testPlainDictateSendsNoCursorContextToTheModel() throws {
++        for raw in [notesSpeech, "Um, so I'll send the deck by Friday."] {
++            let prompt = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++                for: options(.dictate, contextBefore: "\n" + notesLine, contextAfter: "Best regards"), rawTranscription: raw
++            ))
++            XCTAssertFalse(prompt.contains(notesLine))
++            XCTAssertFalse(prompt.contains("Best regards"))
++            XCTAssertFalse(prompt.contains("Text before the cursor"))
++        }
++    }
++
++    func testRequestedTimeReplacementIsNotTreatedAsADroppedTime() {
++        XCTAssertEqual(LocalAPIComposePrompt.missingDateOrTimeTerms("把三点改成四点。", selection: "我们明天下午三点在会议室开会。", output: "我们明天下午四点在会议室开会。"), [])
++        XCTAssertEqual(LocalAPIComposePrompt.missingDateOrTimeTerms("简短一点。", selection: "明天下午三点开会。", output: "开会。"), ["明天", "下午", "三点"])
++        XCTAssertEqual(LocalAPIComposePrompt.missingDateOrTimeTerms("Change the time to four.", selection: "See you at 3 pm.", output: "See you at 4 pm."), [])
++    }
++
++    func testWritePromptForbidsPlaceholders() throws {
++        let english = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.write), rawTranscription: "Write to my manager that I'm leaving."
++        ))
++        XCTAssertTrue(english.contains("Never write placeholders such as [Name]"))
++        let chinese = try XCTUnwrap(LocalAPIComposePrompt.instruction(
++            for: options(.write), rawTranscription: "告诉经理我要离职。"
++        ))
++        XCTAssertTrue(chinese.contains("不要写[姓名]这类占位符"))
++    }
++
++    func testPlaceholderDetection() {
++        for text in ["Hi [Manager's Name], I'm leaving.", "Best, {Your Name}", "Dear <Recipient>,", "您好【姓名】，", "您好［经理姓名］，", "Hi {{name}},"] {
++            XCTAssertTrue(LocalAPIComposePrompt.containsPlaceholder(text, allowedIn: ""), text)
++        }
++        for text in ["Hi Dana, I'm leaving.", "Use the [x] box.", "Check [ ] items", "2 < 3 and 4 > 1", "See [1]."] {
++            XCTAssertFalse(LocalAPIComposePrompt.containsPlaceholder(text, allowedIn: ""), text)
++        }
++        XCTAssertFalse(
++            LocalAPIComposePrompt.containsPlaceholder("Reply with [Project Name] in the subject.", allowedIn: "Tell them to put [Project Name] in the subject."),
++            "brackets the user asked for are content"
++        )
++    }
++
++    func testWriteRetriesOncePlaceholderOutputThenRefuses() async throws {
++        var prompts: [String] = []
++        let fixed = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Write to my manager that I'm leaving.", options: options(.write)
++        ) { prompt in
++            prompts.append(prompt)
++            return prompts.count == 1 ? "Hi [Manager's Name], I'm leaving." : "Hi, I wanted to let you know I'm leaving."
++        }
++        XCTAssertEqual(fixed, "Hi, I wanted to let you know I'm leaving.")
++        XCTAssertEqual(prompts.count, 2)
++        XCTAssertTrue(prompts.last?.contains("The first attempt contained a placeholder") == true)
++        var calls = 0
++        do {
++            _ = try await LocalAPIComposePrompt.compose(
++                rawTranscription: "Write to my manager that I'm leaving.", options: options(.write)
++            ) { _ in calls += 1; return "Hi [Manager's Name], I'm leaving." }
++            XCTFail("a placeholder must never reach the text field")
++        } catch {
++            XCTAssertFalse(error is LocalAPIComposePrompt.EditNotApplied)
++        }
++        XCTAssertEqual(calls, 2)
++        calls = 0
++        let named = try await LocalAPIComposePrompt.compose(
++            rawTranscription: "Write to Dana, my manager, that I'm leaving.", options: options(.write)
++        ) { _ in calls += 1; return "Hi Dana, I'm leaving." }
++        XCTAssertEqual(named, "Hi Dana, I'm leaving.")
++        XCTAssertEqual(calls, 1)
++    }
++
++    func testStyleAdjustsToneLine() {
++        for style in [LocalAPIComposeStyle.formal, .casual, .concise] {
++            let prompt = LocalAPIComposePrompt.instruction(for: options(.write, style: style))!
++            XCTAssertTrue(prompt.contains(style.rawValue), "style \(style.rawValue) appears in the prompt")
++        }
++        let automatic = LocalAPIComposePrompt.instruction(for: options(.write))!
++        XCTAssertFalse(automatic.contains("formal"))
++        XCTAssertFalse(automatic.contains("casual"))
++        XCTAssertFalse(automatic.contains("concise"))
++    }
++
++    func testVocabularyIsListedWhenPresent() {
++        let withTerms = LocalAPIComposePrompt.instruction(
++            for: options(.write, vocabulary: ["Voxt", "Tailscale"])
++        )!
++        XCTAssertTrue(withTerms.contains("Voxt"))
++        XCTAssertTrue(withTerms.contains("Tailscale"))
++
++        let withoutTerms = LocalAPIComposePrompt.instruction(for: options(.write))!
++        XCTAssertFalse(withoutTerms.contains("Prefer these spellings"))
++    }
++
++    func testEditPromptLeavesSelectionVerbatim() {
++        let selection = "line1\n\nline2"
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.edit, selectedText: selection))!
++        XCTAssertTrue(prompt.contains(selection))
++    }
++
++    // MARK: Language variants
++
++    func testVariantsAddRegionalPreferenceWithoutTranslating() {
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.dictate, languageVariants: ["en-US", "zh-Hans"]))!
++        XCTAssertTrue(prompt.contains("en-US"))
++        XCTAssertTrue(prompt.contains("zh-Hans"))
++        XCTAssertTrue(prompt.contains("do not translate"), "variants must never change the output language")
++        XCTAssertTrue(prompt.contains("only when the output"), "spelling/script applies conditionally")
++    }
++
++    func testVariantsAreOmittedWhenEmpty() {
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.dictate))!
++        XCTAssertFalse(prompt.contains("Preferred language variants"))
++    }
++
++    func testVariantsDemandConsistentRegionalSpelling() {
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.dictate, languageVariants: ["en-GB"]))!
++        XCTAssertTrue(prompt.contains("English (United Kingdom)"), "variants carry human locale names")
++        XCTAssertTrue(prompt.contains("consistently"), "spelling must be applied consistently")
++        XCTAssertTrue(prompt.lowercased().contains("every word"), "consistency spans the whole output")
++    }
++
++    func testAutomaticModesIncludeStyleExamplesAfterTaskAndVocabulary() {
++        let examples = [wordingExample]
++        for mode in [LocalAPIComposeMode.dictate, .edit, .write] {
++            let prompt = LocalAPIComposePrompt.instruction(for: options(
++                mode,
++                selectedText: mode == .edit ? "the sentence" : "",
++                style: .automatic,
++                vocabulary: ["grey"],
++                styleExamples: examples
++            ))!
++            XCTAssertTrue(prompt.contains("Personal wording examples"), "\(mode) keeps a distinct example section")
++            XCTAssertTrue(prompt.contains(wordingExample.before))
++            XCTAssertTrue(prompt.contains(wordingExample.after))
++            XCTAssertTrue(prompt.contains("Do not change facts, names, numbers, or the output language."))
++            XCTAssertTrue(prompt.contains("Prefer these spellings: grey."))
++            let task = prompt.range(of: mode == .dictate ? "Do not translate" : mode == .edit ? "Keep the selected text's language" : "Write the actual message requested")!
++            let spellings = prompt.range(of: "Prefer these spellings")!
++            let section = prompt.range(of: "Personal wording examples")!
++            XCTAssertLessThan(task.lowerBound, section.lowerBound)
++            XCTAssertLessThan(spellings.lowerBound, section.lowerBound)
++        }
++    }
++
++    func testTranslateAndExplicitToneOmitStyleExamples() {
++        let examples = [wordingExample]
++        let translate = LocalAPIComposePrompt.instruction(for: options(
++            .translate,
++            targetLanguage: "en",
++            style: .automatic,
++            vocabulary: ["grey"],
++            styleExamples: examples
++        ))!
++        XCTAssertFalse(translate.contains("Personal wording examples"))
++        XCTAssertFalse(translate.contains("Cheers"))
++        XCTAssertTrue(translate.contains("into en"))
++        XCTAssertTrue(translate.contains("Prefer these spellings: grey."))
++
++        for style in [LocalAPIComposeStyle.formal, .casual, .concise] {
++            let prompt = LocalAPIComposePrompt.instruction(for: options(
++                .dictate,
++                style: style,
++                vocabulary: ["grey"],
++                styleExamples: examples
++            ))!
++            XCTAssertFalse(prompt.contains("Personal wording examples"), "\(style) omits stored examples")
++            XCTAssertFalse(prompt.contains("Cheers"))
++            XCTAssertTrue(prompt.contains("Tone: \(style.rawValue)."))
++            XCTAssertTrue(prompt.contains("Prefer these spellings: grey."))
++            XCTAssertTrue(prompt.contains("Do not translate"))
++        }
++    }
++
++    func testEmptyStyleExamplesAddNoSection() {
++        let prompt = LocalAPIComposePrompt.instruction(for: options(.dictate))!
++        XCTAssertFalse(prompt.contains("Personal wording examples"))
++    }
++
++    func testExplicitTranslateTargetWinsOverVariants() {
++        let prompt = LocalAPIComposePrompt.instruction(
++            for: options(.translate, targetLanguage: "zh-Hans", languageVariants: ["en-US"])
++        )!
++        XCTAssertTrue(prompt.contains("into zh-Hans"), "the translate target stays authoritative")
++        XCTAssertFalse(prompt.contains("into en-US"), "a variant must not hijack the target")
++        XCTAssertFalse(prompt.contains("Preferred language variants"), "translation must not receive competing output languages")
++    }
++
++    // MARK: Model availability
++
++    func testDisabledEnhancementMakesComposeUnavailable() {
++        XCTAssertNotNil(
++            LocalAPIComposePrompt.unavailabilityReason(for: .disabled),
++            "compose must fail closed even when enhancement is switched off"
++        )
++    }
++
++    func testUnreadyModelsAreUnavailable() {
++        XCTAssertNotNil(LocalAPIComposePrompt.unavailabilityReason(for: .customLLM(ready: false)))
++        XCTAssertNotNil(LocalAPIComposePrompt.unavailabilityReason(for: .remoteLLM(configured: false)))
++    }
++
++    func testReadyModelsAreAvailable() {
++        XCTAssertNil(LocalAPIComposePrompt.unavailabilityReason(for: .customLLM(ready: true)))
++        XCTAssertNil(LocalAPIComposePrompt.unavailabilityReason(for: .remoteLLM(configured: true)))
++        XCTAssertNil(LocalAPIComposePrompt.unavailabilityReason(for: .appleIntelligence))
++    }
++
++    // MARK: No Mac-side prompt leakage
++
++    private func resolverInput(
++        globalPrompt: String,
++        appendsLanguagePreservationRules: Bool
++    ) -> EnhancementPromptResolver.Input {
++        EnhancementPromptResolver.Input(
++            globalPrompt: globalPrompt,
++            rawTranscription: "speech",
++            userMainLanguagePromptValue: "English",
++            userOtherLanguagesPromptValue: "",
++            dictionaryGlossary: nil,
++            appEnhancementEnabled: false,
++            appendsLanguagePreservationRules: appendsLanguagePreservationRules,
++            groups: [],
++            urlsByID: [:],
++            frontmostBundleID: nil,
++            focusedAppName: nil,
++            normalizedActiveURL: nil,
++            supportedBrowserBundleIDs: []
++        )
++    }
++
++    func testComposeOverrideSuppressesMacLanguageRules() {
++        let compose = EnhancementPromptResolver.resolve(
++            resolverInput(globalPrompt: "Translate the speech.", appendsLanguagePreservationRules: false)
++        )
++        XCTAssertFalse(compose.content.contains("Language rule"), "Mac language preferences must not leak into compose prompts")
++
++        let dictation = EnhancementPromptResolver.resolve(
++            resolverInput(globalPrompt: "Clean this up.", appendsLanguagePreservationRules: true)
++        )
++        XCTAssertTrue(dictation.content.contains("Language rule"), "the standard dictation prompt keeps its rules")
++    }
++}
+diff --git a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+index 89bab7b4d70c3cde29343267920f07083e99d491..ac347f5b69922e160c7d7ea22f16575e83765c7f 100644
+--- a/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
++++ b/Voxt/VoxtTests/LocalAPIDictationPipelineTests.swift
+@@ -199,4 +199,196 @@ final class LocalAPIDictationPipelineTests: XCTestCase {
+         wav += Data("data".utf8) + littleEndian(dataBytes) + Data(count: Int(dataBytes))
+         return wav
+     }
++
++    // MARK: Compose
++
++    private var composeOptions: LocalAPIComposeOptions {
++        LocalAPIComposeOptions(
++            mode: .translate,
++            targetLanguage: "en",
++            selectedText: "",
++            contextBefore: "",
++            contextAfter: "",
++            style: .automatic,
++            vocabulary: []
++        )
++    }
++
++    private func makeComposeRequest(_ options: LocalAPIComposeOptions? = nil) -> LocalAPIComposeRequest {
++        LocalAPIComposeRequest(
++            audio: Data([9, 8, 7]),
++            fileExtension: "m4a",
++            options: options ?? composeOptions
++        )
++    }
++
++    func testComposeTranslateRunsModelAndReportsMode() async throws {
++        var composed: [(String, LocalAPIComposeOptions)] = []
++        let pipeline = makePipeline()
++        pipeline.composeHandler = { text, options in
++            composed.append((text, options))
++            return "Tomorrow at three, meeting about the release."
++        }
++
++        let response = await pipeline.runCompose(makeComposeRequest())
++
++        XCTAssertEqual(response.status, 200)
++        let body = try json(response)
++        XCTAssertEqual(body["text"] as? String, "Tomorrow at three, meeting about the release.")
++        XCTAssertEqual(body["rawText"] as? String, "嗯 那个 明天下午三点开会")
++        XCTAssertEqual(body["mode"] as? String, "translate")
++        XCTAssertEqual(composed.count, 1)
++        XCTAssertEqual(composed.first?.1.mode, .translate)
++        XCTAssertEqual(composed.first?.0, "嗯 那个 明天下午三点开会")
++        XCTAssertEqual(recorded.count, 1)
++        XCTAssertEqual(recorded.first?.mode, .translate)
++        XCTAssertTrue(enhancedInputs.isEmpty, "compose must not run the plain enhancement path")
++    }
++
++    func testRejectedEditReturnsNotAppliedWithoutFinalizingOrRecordingSelection() async throws {
++        let selection = "The server has a cash limit."
++        let pipeline = makePipeline()
++        pipeline.composeHandler = { _, options in
++            try await LocalAPIComposePrompt.compose(rawTranscription: "Fix cash to cash.", options: options) { _ in
++                "The server has a cash to cash limit."
++            }
++        }
++        var options = composeOptions
++        options.mode = .edit
++        options.selectedText = selection
++        let response = await pipeline.runCompose(makeComposeRequest(options))
++        XCTAssertEqual(response.status, 200)
++        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: Any])
++        XCTAssertEqual(json["status"] as? String, "not_applied")
++        XCTAssertEqual(json["message"] as? String, "Couldn't apply that edit")
++        XCTAssertEqual(json["text"] as? String, selection)
++        XCTAssertEqual(json["mode"] as? String, "edit")
++        XCTAssertTrue(recorded.isEmpty)
++    }
++
++    func testComposeModelFailureReturns503WithoutFakeSuccess() async throws {
++        struct Unavailable: LocalizedError { var errorDescription: String? { "No text model is selected." } }
++        let pipeline = makePipeline()
++        pipeline.composeHandler = { _, _ in throw Unavailable() }
++
++        let response = await pipeline.runCompose(makeComposeRequest())
++
++        XCTAssertEqual(response.status, 503)
++        XCTAssertEqual(try json(response)["error"] as? String, "No text model is selected.")
++        XCTAssertTrue(recorded.isEmpty, "a failed compose must not be recorded as a success")
++    }
++
++    func testComposeWithoutModelHandlerFailsClosedForNonDictateModes() async throws {
++        let pipeline = makePipeline()
++
++        let response = await pipeline.runCompose(makeComposeRequest())
++
++        XCTAssertEqual(response.status, 503)
++        XCTAssertTrue(recorded.isEmpty)
++    }
++
++    func testComposeEmptyModelOutputFailsClosed() async throws {
++        let pipeline = makePipeline()
++        pipeline.composeHandler = { _, _ in "  \n " }
++
++        let response = await pipeline.runCompose(makeComposeRequest())
++
++        XCTAssertEqual(response.status, 503)
++        XCTAssertTrue(recorded.isEmpty)
++    }
++
++    func testDictateDiscardsCleanupThatChangesTranscriptScript() async throws {
++        // Qwen3.5-4B translated these Chinese ASR results.
++        let examples = [
++            ("第一，保存报告；第二，发送邮件；第三，关闭窗口。", "First, save the report. Second, send the email. Third, close the window."),
++            ("第一，检查门锁。第二，关掉灯。", "First, check the door lock. Second, turn off the lights."),
++            ("Check the door lock.", "检查门锁。")
++        ]
++        for (raw, cleaned) in examples {
++            let pipeline = makePipeline(transcript: .success(raw))
++            pipeline.composeHandler = { _, _ in cleaned }
++            let response = await pipeline.runCompose(makeComposeRequest(.init()))
++            XCTAssertEqual(response.status, 200)
++            XCTAssertEqual(try json(response)["text"] as? String, raw)
++            XCTAssertEqual(recorded.last?.text, raw)
++        }
++    }
++
++    func testScriptGuardPreservesSameScriptMixedTextAndExplicitTranslation() async throws {
++        for (raw, cleaned) in [("今天用 Voxt 写报告。", "今天用 Voxt 写报告。"), ("um call Alex", "Call Alex."), ("下午三点。", "下午三点！")] {
++            let pipeline = makePipeline(transcript: .success(raw))
++            pipeline.composeHandler = { _, _ in cleaned }
++            let response = await pipeline.runCompose(makeComposeRequest(.init()))
++            XCTAssertEqual(try json(response)["text"] as? String, cleaned)
++        }
++        let pipeline = makePipeline(transcript: .success("检查门锁。"))
++        pipeline.composeHandler = { _, _ in "Check the door lock." }
++        let response = await pipeline.runCompose(makeComposeRequest(composeOptions))
++        XCTAssertEqual(try json(response)["text"] as? String, "Check the door lock.")
++    }
++
++    func testComposeDictateAlwaysUsesTheModelPath() async throws {
++        var composed: [(String, LocalAPIComposeOptions)] = []
++        let pipeline = makePipeline(transcript: .success("um clean up this text"))
++        pipeline.composeHandler = { text, options in
++            composed.append((text, options))
++            return "Cleaned up text."
++        }
++
++        var dictateOptions = composeOptions
++        dictateOptions.mode = .dictate
++        dictateOptions.targetLanguage = nil
++        let response = await pipeline.runCompose(makeComposeRequest(dictateOptions))
++
++        XCTAssertEqual(response.status, 200)
++        let body = try json(response)
++        XCTAssertEqual(body["text"] as? String, "Cleaned up text.")
++        XCTAssertEqual(body["mode"] as? String, "dictate")
++        XCTAssertEqual(composed.count, 1, "even a plain compose dictate runs the model path")
++        XCTAssertTrue(enhancedInputs.isEmpty, "compose never takes the legacy enhancement path")
++    }
++
++    func testComposeDictateWithOptionsUsesTheModelPath() async throws {
++        var composed: [(String, LocalAPIComposeOptions)] = []
++        let pipeline = makePipeline()
++        pipeline.composeHandler = { text, options in
++            composed.append((text, options))
++            return "Cleaned up text."
++        }
++
++        var dictateOptions = composeOptions
++        dictateOptions.mode = .dictate
++        dictateOptions.targetLanguage = nil
++        dictateOptions.style = .formal
++        dictateOptions.vocabulary = ["SGLang"]
++        let response = await pipeline.runCompose(makeComposeRequest(dictateOptions))
++
++        XCTAssertEqual(response.status, 200)
++        XCTAssertEqual(try json(response)["mode"] as? String, "dictate")
++        XCTAssertEqual(composed.count, 1, "non-plain dictate must run the compose path")
++        XCTAssertEqual(composed.first?.1.vocabulary, ["SGLang"])
++        XCTAssertTrue(enhancedInputs.isEmpty, "the plain enhancement prompt must not run for option-carrying dictate")
++    }
++
++    func testComposeDictateFailsClosedWhenTheModelThrows() async throws {
++        struct Boom: Error {}
++        let pipeline = makePipeline(enhanced: .failure(Boom()))
++
++        var dictateOptions = composeOptions
++        dictateOptions.mode = .dictate
++        dictateOptions.targetLanguage = nil
++        let response = await pipeline.runCompose(makeComposeRequest(dictateOptions))
++
++        XCTAssertEqual(response.status, 503, "compose dictate must not fall back to the raw transcript")
++        XCTAssertTrue(recorded.isEmpty)
++    }
++
++    func testComposeSharesTheBusyGuardWithDictations() async throws {
++        let pipeline = makePipeline(busyReason: "Voxt is recording on the Mac.")
++
++        let response = await pipeline.runCompose(makeComposeRequest())
++
++        XCTAssertEqual(response.status, 503)
++        XCTAssertTrue(transcribedFiles.isEmpty)
++    }
+ }
+diff --git a/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift b/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
+index ff63199d467b089f40e611e914d53d26743a5394..c24a202a6bb4126a7b071f5f4e1af18aac132ba8 100644
+--- a/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
++++ b/Voxt/VoxtTests/LocalAPIRequestHandlerTests.swift
+@@ -84,11 +84,53 @@ final class LocalAPIRequestHandlerTests: XCTestCase {
+         XCTAssertEqual(api["minor"], 0)
+         XCTAssertEqual(body["app"] as? String, "Voxt")
+         XCTAssertEqual(body["version"] as? String, "2.0")
+-        XCTAssertEqual(body["endpoints"] as? [String], ["health", "capabilities", "dictations"])
++        XCTAssertEqual(body["endpoints"] as? [String], [
++            "health",
++            "capabilities",
++            "dictations",
++            "compose",
++            "compose/prompts",
++        ])
+         let audio = try XCTUnwrap(body["audio"] as? [String: Any])
+         XCTAssertEqual(audio["maxBodyBytes"] as? Int, 4_096)
+         XCTAssertEqual(audio["contentTypes"] as? [String], LocalAPIRouter.audioExtensions.keys.sorted())
+         let models = try XCTUnwrap(body["models"] as? [String: String])
+         XCTAssertEqual(models, ["transcription": "ready", "text": "off"])
+     }
++
++    func testBuiltInPromptsRequireTheTokenAndListEveryMode() async throws {
++        let handler = LocalAPIRequestHandler.make(
++            router: LocalAPIRouter(token: "t", maxBodyBytes: 10), version: "1",
++            modelStatus: Self.readyModels,
++            dictate: { _ in .error(status: 500, "unused") },
++            compose: { _ in .error(status: 500, "unused") })
++        let forbidden = await handler(request("GET", "/v1/compose/prompts", token: "wrong"))
++        XCTAssertEqual(forbidden.status, 401)
++        let wrongMethod = await handler(request("POST", "/v1/compose/prompts"))
++        XCTAssertEqual(wrongMethod.status, 405)
++        let response = await handler(request("GET", "/v1/compose/prompts"))
++        XCTAssertEqual(response.status, 200)
++        let body = try JSONDecoder().decode([String: [String: String]].self, from: response.body)
++        XCTAssertEqual(body["prompts"], LocalAPIComposePrompt.builtInPrompts())
++    }
++
++    func testComposeIsForwarded() async throws {
++        let handler = LocalAPIRequestHandler.make(
++            router: LocalAPIRouter(token: "t", maxBodyBytes: 1_000),
++            version: "1",
++            modelStatus: Self.readyModels,
++            dictate: { @MainActor _ in .json(status: 200, ["text": "x"]) },
++            compose: { @MainActor request in .json(status: 200, ["mode": request.options.mode.rawValue]) }
++        )
++        var compose = request("POST", "/v1/compose")
++        compose.headers["content-type"] = "application/json"
++        compose.body = try JSONSerialization.data(withJSONObject: [
++            "audio": Data([1]).base64EncodedString(),
++            "contentType": "audio/wav",
++            "options": ["mode": "write", "style": "concise", "vocabulary": [], "selectedText": "", "contextBefore": "", "contextAfter": "", "targetLanguage": NSNull()]
++        ])
++        let response = await handler(compose)
++        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: String])
++        XCTAssertEqual(body["mode"], "write")
++    }
+ }
+diff --git a/Voxt/VoxtTests/LocalAPIRouterTests.swift b/Voxt/VoxtTests/LocalAPIRouterTests.swift
+index 8b309797f10b5ea2850b199d8029d0abb72bf13c..27450553a05ac377dcaad4e7e17bdc1f2d713446 100644
+--- a/Voxt/VoxtTests/LocalAPIRouterTests.swift
++++ b/Voxt/VoxtTests/LocalAPIRouterTests.swift
+@@ -92,4 +92,186 @@ final class LocalAPIRouterTests: XCTestCase {
+         XCTAssertEqual(status(router.route(request("GET", "/v1/capabilities", token: nil))), 401)
+         XCTAssertEqual(status(router.route(request("POST", "/v1/capabilities"))), 405)
+     }
++
++    // MARK: Compose
++
++    private func composeBody(
++        mode: String = "dictate",
++        targetLanguage: String? = nil,
++        selectedText: String? = nil,
++        contextBefore: String? = nil,
++        contextAfter: String? = nil,
++        style: String? = nil,
++        vocabulary: [String]? = nil,
++        languageVariants: [String]? = nil,
++        omitLanguageVariants: Bool = false,
++        styleExamples: Any? = nil,
++        sendStyleExamples: Bool = false,
++        audio: String = Data([9, 8, 7]).base64EncodedString(),
++        contentType: String = "audio/wav"
++    ) throws -> Data {
++        var options: [String: Any] = ["mode": mode]
++        options["targetLanguage"] = targetLanguage
++        options["selectedText"] = selectedText ?? ""
++        options["contextBefore"] = contextBefore ?? ""
++        options["contextAfter"] = contextAfter ?? ""
++        options["style"] = style ?? "automatic"
++        options["vocabulary"] = vocabulary ?? []
++        if !omitLanguageVariants {
++            options["languageVariants"] = languageVariants ?? []
++        }
++        if sendStyleExamples {
++            options["styleExamples"] = styleExamples ?? NSNull()
++        }
++        let body: [String: Any] = ["audio": audio, "contentType": contentType, "options": options]
++        return try JSONSerialization.data(withJSONObject: body)
++    }
++
++    private func composeRequest(_ body: Data, contentType: String = "application/json") -> LocalAPIHTTPRequest {
++        request("POST", "/v1/compose", contentType: contentType, body: body)
++    }
++
++    func testComposeRoutesDecodedRequest() throws {
++        let route = router.route(composeRequest(try composeBody(
++            mode: "translate",
++            targetLanguage: "zh-Hans",
++            selectedText: "hello",
++            style: "formal",
++            vocabulary: ["Voxt"]
++        )))
++
++        guard case let .compose(compose) = route else {
++            return XCTFail("expected .compose, got \(route)")
++        }
++        XCTAssertEqual(compose.audio, Data([9, 8, 7]))
++        XCTAssertEqual(compose.fileExtension, "wav")
++        XCTAssertEqual(compose.options.mode, .translate)
++        XCTAssertEqual(compose.options.targetLanguage, "zh-Hans")
++        XCTAssertEqual(compose.options.selectedText, "hello")
++        XCTAssertEqual(compose.options.style, .formal)
++        XCTAssertEqual(compose.options.vocabulary, ["Voxt"])
++    }
++
++    func testComposeRejectsUnauthorizedAndWrongMethod() throws {
++        XCTAssertEqual(status(router.route(request("POST", "/v1/compose", token: nil))), 401)
++        XCTAssertEqual(status(router.route(request("GET", "/v1/compose"))), 405)
++    }
++
++    func testComposeRejectsNonJSONAndBrokenBodies() throws {
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(), contentType: "audio/wav"))), 415)
++        XCTAssertEqual(status(router.route(composeRequest(Data("not json".utf8)))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(audio: "%%%not-base64%%%")))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(audio: "")))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(contentType: "text/plain")))), 415)
++    }
++
++    func testComposeRejectsUnknownEnums() throws {
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(mode: "summarize")))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(style: "playful")))), 400)
++    }
++
++    func testComposeEnforcesModeRequirements() throws {
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(mode: "translate")))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(mode: "translate", targetLanguage: "klingon")))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(mode: "translate", targetLanguage: "zz")))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(mode: "translate", targetLanguage: String(repeating: "a", count: 65))))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(mode: "edit")))), 400)
++        if case .reject = router.route(composeRequest(try composeBody(mode: "edit", selectedText: "keep this"))) {
++            XCTFail("edit with a selection must pass routing")
++        }
++        if case .reject = router.route(composeRequest(try composeBody(mode: "translate", targetLanguage: "zh-Hans"))) {
++            XCTFail("translate with a BCP-47 tag must pass routing")
++        }
++    }
++
++    func testComposeEnforcesSizeLimits() throws {
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(mode: "edit", selectedText: String(repeating: "a", count: 8_001))))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(contextBefore: String(repeating: "a", count: 2_001))))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(contextAfter: String(repeating: "a", count: 2_001))))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(vocabulary: Array(repeating: "term", count: 201))))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(vocabulary: [String(repeating: "a", count: 101)])))), 400)
++    }
++
++    func testComposeAcceptsOneVariantPerLanguageBase() throws {
++        if case .reject = router.route(composeRequest(try composeBody(
++            languageVariants: ["en-US", "zh-Hans", "es-MX", "fr-CA", "pt-BR"]
++        ))) {
++            XCTFail("one variant per base must pass")
++        }
++    }
++
++    func testComposeRejectsInvalidLanguageVariants() throws {
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(languageVariants: ["en-US", "klingon"])))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(languageVariants: ["banana"])))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(languageVariants: ["en-US", "en-GB"])))), 400)
++        XCTAssertEqual(status(router.route(composeRequest(try composeBody(languageVariants: ["zh-Hans", "zh-Hant"])))), 400)
++    }
++
++    private func rejection(_ route: LocalAPIRoute) -> String? {
++        guard case let .reject(response) = route,
++              let object = try? JSONSerialization.jsonObject(with: response.body) as? [String: String] else { return nil }
++        return object["error"]
++    }
++
++    private func stylePair(_ before: String, _ after: String, extra: String? = nil) -> [String: Any] {
++        var pair: [String: Any] = ["before": before, "after": after]
++        if let extra { pair["label"] = extra }
++        return pair
++    }
++
++    func testComposeAbsentStyleExamplesDecodesEmpty() throws {
++        guard case let .compose(compose) = router.route(composeRequest(try composeBody())) else {
++            return XCTFail("a request without styleExamples must still route")
++        }
++        XCTAssertEqual(compose.options.styleExamples, [])
++    }
++
++    func testComposeAcceptsEightDifferentStyleExamples() throws {
++        let examples = (1...8).map { stylePair("Send file \($0).", "Send the file \($0).") }
++        guard case let .compose(compose) = router.route(composeRequest(try composeBody(styleExamples: examples, sendStyleExamples: true))) else {
++            return XCTFail("eight examples must route")
++        }
++        XCTAssertEqual(compose.options.styleExamples.count, 8)
++        XCTAssertEqual(compose.options.styleExamples[0].before, "Send file 1.")
++        XCTAssertEqual(compose.options.styleExamples[0].after, "Send the file 1.")
++    }
++
++    func testComposeRejectsInvalidStyleExamples() throws {
++        let ninth = (1...9).map { stylePair("Send file \($0).", "Send the file \($0).") }
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: ninth, sendStyleExamples: true)))), "Use at most 8 personal style examples.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [stylePair("", "Cheers")], sendStyleExamples: true)))), "A personal style example must be 1 to 120 characters.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [stylePair(String(repeating: "a", count: 121), "b")], sendStyleExamples: true)))), "A personal style example must be 1 to 120 characters.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [stylePair(" \n\t ", "Cheers")], sendStyleExamples: true)))), "A personal style example must not be blank.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [stylePair("Thanks", "Thanks")], sendStyleExamples: true)))), "The personal style example texts must differ.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [stylePair("at 3", "at 4")], sendStyleExamples: true)))), "Personal style examples must keep the same digit sequences.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [stylePair("$50", "fifty")], sendStyleExamples: true)))), "Personal style examples must keep the same digit sequences.")
++        let duplicated = stylePair("Thanks, I'll send Alice the file at 3.", "Cheers — I'll send Alice the file at 3.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [duplicated, duplicated], sendStyleExamples: true)))), "Personal style examples must not repeat.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [stylePair("Thanks", "Cheers", extra: "habit")], sendStyleExamples: true)))), "The personal style request has invalid fields.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: "Cheers", sendStyleExamples: true)))), "The personal style request has invalid fields.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: NSNull(), sendStyleExamples: true)))), "The personal style request has invalid fields.")
++        XCTAssertEqual(rejection(router.route(composeRequest(try composeBody(styleExamples: [["before": 1, "after": "Cheers"]], sendStyleExamples: true)))), "The personal style request has invalid fields.")
++    }
++
++    func testComposeAcceptsOmittedLanguageVariants() throws {
++        if case .reject = router.route(composeRequest(try composeBody(omitLanguageVariants: true))) {
++            XCTFail("requests without languageVariants must keep working")
++        }
++    }
++
++
++    func testComposeLanguageFollowsTheDictationRule() throws {
++        func language(_ value: Any?) throws -> LocalAPIRoute {
++            var body = try JSONSerialization.jsonObject(with: try composeBody()) as! [String: Any]
++            body["language"] = value
++            return router.route(composeRequest(try JSONSerialization.data(withJSONObject: body)))
++        }
++        guard case let .compose(settings) = try language(nil),
++              case let .compose(automatic) = try language("auto"),
++              case let .compose(chinese) = try language("Chinese") else { return XCTFail("expected compose routes") }
++        XCTAssertEqual(settings.language, .userSettings)
++        XCTAssertEqual(automatic.language, .request(nil))
++        XCTAssertEqual(chinese.language, .request("Chinese"))
++        XCTAssertEqual(status(try language("en\"; x")), 400)
++    }
+ }
+diff --git a/Voxt/docs/LocalAPI.md b/Voxt/docs/LocalAPI.md
+index 88331b72a9ff6758df73f582f5de8bb890d2507e..8ea6cb2f935d23cc80f3316195c5c9eac09dd0d8 100644
+--- a/Voxt/docs/LocalAPI.md
++++ b/Voxt/docs/LocalAPI.md
+@@ -33,11 +33,28 @@ Every request needs `Authorization: Bearer <token>`. **Regenerate** issues a new
+ | `GET /v1/capabilities` | API version, endpoints, accepted audio types, size limit, and whether the selected transcription and text models are ready |
+ | `POST /v1/dictations` | Body: audio bytes. `Content-Type`: `audio/wav`, `audio/x-m4a`, `audio/mp4`, `audio/aac`, `audio/mpeg` or `audio/x-caf`. Add `?enhance=0` to skip the text model, and `?language=auto` (detect) or `?language=English` (a language name) to override your language settings for this recording. Returns `id`, `text`, `rawText`, `enhanced`, `asrMs`, `enhanceMs` |
+ 
++| `POST /v1/compose` | JSON body: `audio` (base64), `contentType` (one of the audio types above), optional `language` (as for dictations) and `options`. Runs the selected text model with an instruction for `options.mode`. Returns the dictation fields plus `mode`, and `status: "not_applied"` with the unchanged selection when an edit could not be applied |
++| `GET /v1/compose/prompts` | `{"prompts": {"dictate": "…", "translate": "…", "edit": "…", "write": "…"}}`: the built-in instruction of each mode |
++
++`options` of a compose request:
++
++| Field | Meaning |
++| --- | --- |
++| `mode` | `dictate` (clean up the speech), `translate` (needs `targetLanguage`, a BCP-47 tag such as `zh-Hans`), `edit` (apply the spoken instruction to `selectedText`) or `write` (draft from the spoken request) |
++| `selectedText`, `contextBefore`, `contextAfter` | Text at the caller's cursor: up to 8,000 characters selected and 2,000 on each side |
++| `style` | `automatic`, `formal`, `casual` or `concise` |
++| `vocabulary` | Up to 200 preferred spellings, each up to 100 characters |
++| `languageVariants` | At most one per language: `en-US`, `en-GB`, `en-AU`, `en-CA`, `zh-Hans`, `zh-Hant`, `es-ES`, `es-MX`, `fr-FR`, `fr-CA`, `pt-PT`, `pt-BR` |
++| `styleExamples` | Up to 8 `{"before", "after"}` wording pairs of 1 to 120 characters that keep the same digits; used only with `style: automatic` and not for `translate` |
++| `customPrompt` | Replaces the built-in instruction of the mode for this request, up to 4,000 characters |
++
++Every compose mode needs a working text model; without one the request fails with 503 instead of returning the raw transcript.
++
+ `capabilities` example:
+ 
+ ```json
+ {"api":{"major":1,"minor":0},"app":"Voxt","version":"1.15.0",
+- "endpoints":["health","capabilities","dictations"],
++ "endpoints":["health","capabilities","dictations","compose","compose/prompts"],
+  "audio":{"contentTypes":["audio/aac","audio/m4a","audio/mp4","audio/mpeg","audio/wav","audio/wave","audio/x-caf","audio/x-m4a","audio/x-wav"],"maxBodyBytes":26214400},
+  "models":{"transcription":"ready","text":"off"}}
+ ```
+@@ -59,7 +76,7 @@ Errors return `{"error": "…"}`.
+ | 413 | Body larger than 25 MB |
+ | 415 | Unsupported audio type |
+ | 422 | No speech detected |
+-| 503 | Voxt is recording or in a meeting, or another API dictation is still running |
++| 503 | Voxt is recording or in a meeting, another API dictation is still running, or a compose request has no working text model |
+ | 500 | The selected model failed, for example a remote provider could not be reached |
+ 
+ If the text model fails, the request still succeeds with the raw transcript and `"enhanced": false`.
