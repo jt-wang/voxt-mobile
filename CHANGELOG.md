@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.6
+
+Mac download update: Start Here in the DMG shows every step as a moving picture of where to click.
+
+- **Start Here is a picture guide: one picture per step showing where to click.**
+
 ## v0.1.5
 
 Mac setup update: Voxt Connector walks you through the setup, the DMG explains it, and one link always gets the newest DMG.

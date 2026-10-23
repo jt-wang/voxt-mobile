@@ -195,8 +195,10 @@ struct LocalAPIPicture: View {
 
 struct ModelsPicture: View {
     let phase: Int?
+    /// One still with both model controls ringed, for the DMG's Start Here page.
+    var ringsModels = false
     var body: some View {
-        LoopingPicture(phases: 6, fixed: phase,
+        LoopingPicture(phases: 6, fixed: ringsModels ? 4 : phase,
                        summary: "In Voxt, click Feature, then Transcription. Choose a Speech Model, turn on Text Enhancement and choose an Enhancement Model. Then click Model Setup Required to download them.") { phase in
             VoxtWindow {
                 if phase == 0 || phase == 5 {
@@ -213,7 +215,7 @@ struct ModelsPicture: View {
                     Text("Choose a speech model, then add text enhancement if needed.")
                         .font(.system(size: 9.5)).foregroundStyle(.secondary)
                     VStack(spacing: 0) {
-                        selector("Speech Model", chosen: phase >= 3, ring: phase == 2)
+                        selector("Speech Model", chosen: phase >= 3 && !ringsModels, ring: phase == 2 || ringsModels)
                         Divider()
                         HStack {
                             Text("Text Enhancement").font(.system(size: 11, weight: .medium))
@@ -334,6 +336,51 @@ struct PermissionsPicture: View {
                     }
                 }
                 .opacity(phase == 0 ? 0.45 : 1)
+            }
+        }
+    }
+}
+
+/// Voxt Connector's Add your iPhone step: click Add iPhone, and a QR code appears for the iPhone to scan.
+/// Drawn for the DMG's Start Here page. The phone glyph covers the middle of the code, so a camera can't read it.
+struct AddPhonePicture: View {
+    let code: ConnectorPairingCode
+    let phase: Int?
+    var body: some View {
+        LoopingPicture(phases: 2, fixed: phase,
+                       summary: "In Voxt Connector, click Add iPhone. A QR code appears for your iPhone.") { phase in
+            MockWindow(width: 460, height: 214) {
+                HStack(alignment: .center, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Add your iPhone").font(.system(size: 13, weight: .semibold))
+                        Text("Add iPhone")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12).frame(height: 22)
+                            .background(Color.accentColor.opacity(phase == 0 ? 1 : 0.45), in: RoundedRectangle(cornerRadius: 6))
+                            .ring(phase == 0)
+                    }
+                    Image(systemName: "arrow.right").font(.system(size: 16, weight: .semibold)).foregroundStyle(.secondary)
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(Color.secondary.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                            .frame(width: 160, height: 160)
+                        if phase >= 1 {
+                            PairingQRCode(code: code, side: 136)
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(Color(nsColor: .windowBackgroundColor))
+                                        .frame(width: 62, height: 62)
+                                        .overlay(Image(systemName: "iphone").font(.system(size: 28, weight: .medium))
+                                            .foregroundStyle(.secondary))
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .transition(.opacity)
+                        }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
