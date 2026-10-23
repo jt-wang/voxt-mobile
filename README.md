@@ -29,14 +29,25 @@ It is built on [Voxt](https://github.com/sgl-project/sglang-omni/tree/main/Voxt)
 
 ## Install
 
-Today you build it on your own Mac, so every line you run is here:
+**On your Mac** (Apple silicon, macOS 26.2 or later)
+
+1. Download the **VoxtMobile-Mac** DMG from the [latest release](https://github.com/jt-wang/voxt-mobile/releases/latest). Drag both apps into Applications: **Voxt Omni Dev** (Voxt with the phone feature) and **Voxt Connector**.
+2. Open Voxt Omni Dev, choose a speech model and a text model, then turn on Settings › General › Local API › Allow other apps to dictate through Voxt. If macOS asks for permissions, allow them.
+3. Open Voxt Connector (it lives in the menu bar). Choose Allow when it asks to connect to Voxt, then choose **Add iPhone**. It shows a QR code.
+
+**On your iPhone** (iOS 17 or later)
+
+4. Join the beta at [TestFlight](https://testflight.apple.com/join/ddn8Mz84) and install Voxt.
+5. Open it, add the Voxt keyboard as it shows you, and scan the QR code on your Mac.
+
+### Build it yourself
+
+Every line you run is here:
 
 - **Step by step, no coding needed:** [INSTALL.md](INSTALL.md)
 - **With Claude Code or Codex:** open this folder and say *"Install Voxt Mobile by following [AGENT-INSTALL.md](AGENT-INSTALL.md)."* It runs the builds and tells you when to click something on the Mac or the phone.
 
-You need an Apple silicon Mac, an iPhone on iOS 17 or later and an Apple ID; a free one works. With a free Apple ID, plug the phone in and press Run in Xcode once a week to keep the app opening.
-
-Voxt Mobile is in private beta on TestFlight. Follow [@thejingtao](https://x.com/thejingtao) on X and I'll send you an invite.
+You need an Apple ID; a free one works. With a free Apple ID, plug the phone in and press Run in Xcode once a week to keep the app opening.
 
 ## How it works
 

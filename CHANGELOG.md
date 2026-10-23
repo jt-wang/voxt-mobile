@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.4
+
+README: install in five steps with the Mac download and the public TestFlight beta; building it yourself comes second. No app changes; the v0.1.3 apps are current.
+
 ## v0.1.3
 
 iPhone update: the app says on its first screen that it needs your Mac, and where to get the Mac apps.
