@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.5
+
+Mac setup update: Voxt Connector walks you through the setup, the DMG explains it, and one link always gets the newest DMG.
+
+- **Voxt Connector has a setup guide.** On first launch, before any iPhone is paired, it opens a window with the steps in order: open Voxt Omni Dev, the Mac permissions (optional: phone dictation needs neither), turn on Local API, allow Voxt Connector, choose models, add your iPhone. Each step ticks itself off when Connector sees it done, says why it is needed, and shows where to click in Voxt. Open it again any time with Set up… in the menu.
+- **Start Here in the DMG.** The DMG window shows the two apps with an arrow to Applications, and Start Here.html: how to install, which speech and text models to choose in Voxt, how to pair the iPhone, and why each step is needed.
+- **The download link always gets the newest DMG.** Each release also attaches the DMG as `VoxtMobile-Mac.dmg`, so https://github.com/jt-wang/voxt-mobile/releases/latest/download/VoxtMobile-Mac.dmg needs no version number. The release notes start with the install steps.
+- **README:** the site's two buttons at the top, Join the TestFlight beta and Download for Mac.
+- **The apps report 0.1.5.**
+
 ## v0.1.4
 
 README: install in five steps with the Mac download and the public TestFlight beta; building it yourself comes second. No app changes; the v0.1.3 apps are current.

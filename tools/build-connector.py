@@ -61,7 +61,19 @@ def bundle_id(config=CONFIG, env=os.environ):
     return value
 
 
-def xcodebuild_command(derived, result_bundle, bundle):
+def iphone_app_url(config=CONFIG, env=os.environ):
+    """Where the setup guide links for the iPhone app: VOXT_IPHONE_APP_URL from the file
+    VOXT_CONNECTOR_SIGNING_LOCAL names, else from Signing.local.xcconfig. None keeps the upstream setup
+    steps that Signing.shared.xcconfig names. The value is passed on, never printed.
+    """
+    private = env.get("VOXT_CONNECTOR_SIGNING_LOCAL", "")
+    path = Path(private) if private else Path(config) / "Signing.local.xcconfig"
+    if not path.is_file():
+        return None
+    return xcconfig_setting(path, "VOXT_IPHONE_APP_URL") or None
+
+
+def xcodebuild_command(derived, result_bundle, bundle, iphone_app=None):
     return [
         "nice",
         "-n",
@@ -84,7 +96,7 @@ def xcodebuild_command(derived, result_bundle, bundle):
         "4",
         "CODE_SIGNING_ALLOWED=NO",
         f"VOXT_CONNECTOR_BUNDLE_ID={bundle}",
-    ]
+    ] + ([f"VOXT_IPHONE_APP_URL={iphone_app}"] if iphone_app else [])
 
 
 def add_icon(app, icon=ICON):
@@ -214,7 +226,9 @@ def main():
         check=True,
     )
     subprocess.run(
-        xcodebuild_command(derived, evidence / (stamp + ".xcresult"), bundle),
+        xcodebuild_command(
+            derived, evidence / (stamp + ".xcresult"), bundle, iphone_app_url()
+        ),
         check=True,
     )
     app = derived / "Build/Products/Release/Voxt Connector.app"

@@ -5,6 +5,7 @@ Usage: python3 -I tools/test-release-gate.py [-v] [--ipa path/to/old.ipa]
 Builds small git repos, IPAs and one DMG under $TMPDIR. Runs no xcodebuild and no Go build.
 --ipa also checks a real IPA built before the gate existed: it must be blocked.
 """
+import importlib.util
 import os
 import plistlib
 import shutil
@@ -69,6 +70,42 @@ def make_ipa(path, app_revision, keyboard_revision=None, binary=b"\x00code\x00",
     return path
 
 
+# The public README's Install steps and CHANGELOG, as the release notes reuse them.
+README = """# Voxt Mobile
+
+## Install
+
+**On your Mac**
+
+1. Download [VoxtMobile-Mac.dmg](https://github.com/example/voxt-mobile/releases/latest/download/VoxtMobile-Mac.dmg).
+2. Open the apps.
+
+**On your iPhone**
+
+3. Join the beta.
+
+### Build it yourself
+
+Every line you run is here.
+
+## How it works
+
+Three pieces.
+"""
+CHANGELOG = """# Changelog
+
+## v1.0.0
+
+The first release.
+
+- **One thing.** It works.
+
+## v0.9.0
+
+Older.
+"""
+
+
 class Fixture(unittest.TestCase):
     """A public remote with main at `released` (tagged v1.0.0), a commit only on a side branch,
     and a local export folder whose tree matches `released`."""
@@ -79,7 +116,8 @@ class Fixture(unittest.TestCase):
         work = self.tmp / "work"
         work.mkdir()
         git(work, "init", "-q", "-b", "main")
-        (work / "README.md").write_text("public\n")
+        (work / "README.md").write_text(README)
+        (work / "CHANGELOG.md").write_text(CHANGELOG)
         (work / "tools").mkdir()
         (work / "tools/run.sh").write_text("#!/bin/sh\necho hi\n")
         (work / "tools/run.sh").chmod(0o755)
@@ -254,6 +292,42 @@ class CheckTests(Fixture):
         subprocess.run(["hdiutil", "create", "-quiet", "-fs", "HFS+", "-volname", "T", "-srcfolder", folder, dmg], check=True)
         self.assertBlocked(gate("check", dmg, *self.remote_args()), "Symbols/x.symbols")
 
+    def test_a_dmg_from_release_mac_passes_with_its_window_layout(self):
+        # dmgbuild's .DS_Store links Finder's background picture by a path on the DMG's own volume.
+        folder = self.tmp / "apps"
+        app = folder / "Voxt Connector.app/Contents"
+        (app / "MacOS").mkdir(parents=True)
+        (app / "Info.plist").write_bytes(info("com.example.connector", self.released))
+        (app / "MacOS/Voxt Connector").write_bytes(b"\x00binary\x00")
+        (folder / "Start Here.html").write_text("<!doctype html><title>Start here</title>\n")
+        background = folder / "background.svg"
+        background.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400"><rect width="660" height="400"/></svg>')
+        dmg = self.tmp / "own.dmg"
+        made = subprocess.run([sys.executable, "-I", str(TOOLS / "release-mac.py"), "dmg", "--identity", "-", "--no-timestamp",
+                               "--volname", "Voxt Mobile", "--out", str(dmg), "--extra", str(folder / "Start Here.html"),
+                               "--background", str(background), str(folder / "Voxt Connector.app")],
+                              capture_output=True, text=True, timeout=600)
+        self.assertPassed(made)
+        result = gate("check", dmg, *self.remote_args())
+        self.assertPassed(result)
+        self.assertIn("own.dmg: .DS_Store names its own volume, Voxt Mobile", result.stdout)
+
+    def test_only_the_dmgs_own_volume_is_allowed_in_its_layout(self):
+        spec = importlib.util.spec_from_file_location("release_gate", GATE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        allowed = module.own_volume_path
+        own = VOLUMES + b"Voxt Mobile"
+        self.assertTrue(allowed(".DS_Store", own + b"\xff\xff", "Voxt Mobile"))
+        self.assertTrue(allowed(".DS_Store", own, "Voxt Mobile"))
+        for name, found, volume in ((".DS_Store", own + b" 1\xff", "Voxt Mobile"),
+                                    (".DS_Store", own + b"/../Disk/x", "Voxt Mobile"),
+                                    (".DS_Store", b"/" + b"Users/someone/bg.png", "Voxt Mobile"),
+                                    (".DS_Store", own, None),
+                                    ("notes.txt", own, "Voxt Mobile"),
+                                    ("Voxt Connector.app/.DS_Store", own, "Voxt Mobile")):
+            self.assertFalse(allowed(name, found, volume), (name, found, volume))
+
     def test_blocks_an_artifact_with_no_app(self):
         empty = self.tmp / "empty.ipa"
         with zipfile.ZipFile(empty, "w") as z:
@@ -272,11 +346,11 @@ class ReleaseTests(Fixture):
 
     TAGGER = "Release Bot <release@example.com>"
 
-    def dmg(self, revision):
+    def dmg(self, revision, version="1.0.0"):
         folder = self.tmp / "dmg-src"
         app = folder / "Voxt Connector.app/Contents"
         app.mkdir(parents=True, exist_ok=True)
-        (app / "Info.plist").write_bytes(info("com.example.connector", revision))
+        (app / "Info.plist").write_bytes(info("com.example.connector", revision, version=version))
         path = self.tmp / "VoxtConnector.dmg"
         subprocess.run(["hdiutil", "create", "-quiet", "-ov", "-fs", "HFS+", "-volname", "T", "-srcfolder", folder, path], check=True)
         return path
@@ -308,6 +382,28 @@ class ReleaseTests(Fixture):
             self.assertIn(text, notes)
         self.assertIn("git -C", result.stdout, "prints the push command")
         self.assertNotIn("v1.0.0+7", git(self.remote, "tag", "--list"), "nothing is pushed")
+
+    def test_notes_start_with_the_install_steps_then_the_changelog(self):
+        self.assertPassed(self.release("--dmg", self.dmg(self.released)))
+        notes = (self.tmp / "notes.md").read_text()
+        order = ["# Voxt Mobile v1.0.0", "## Install", "**On your Mac**", "1. Download", "3. Join the beta.",
+                 "## What's new", "The first release.", "- **One thing.** It works.", "## Build"]
+        self.assertEqual([text for text in order if text not in notes], [], notes)
+        self.assertEqual(sorted(order, key=notes.index), order, notes)
+        self.assertIn("releases/download/v1.0.0/VoxtMobile-Mac.dmg", notes, "this release's DMG, not latest")
+        self.assertNotIn("releases/latest", notes)
+        for text in ("Build it yourself", "How it works", "Older.", "(fill in)", "Draft release notes"):
+            self.assertNotIn(text, notes)
+        build = notes[notes.index("## Build"):]
+        self.assertIn("`VoxtMobile-Mac.dmg`", build, "the stable name the latest-download link uses")
+        self.assertIn("`VoxtMobile-Mac-v1.0.0.dmg`", build)
+
+    def test_refuses_a_version_missing_from_the_changelog_and_tags_nothing(self):
+        result = gate("release", "--version", "v1.0.1", "--notes", self.tmp / "notes.md", "--tagger", self.TAGGER,
+                      *self.remote_args(), "--dmg", self.dmg(self.released, version="1.0.1"))
+        self.assertBlocked(result, "## v1.0.1")
+        self.assertNotIn("v1.0.1+mac", self.tags())
+        self.assertFalse((self.tmp / "notes.md").exists())
 
     def test_a_mac_only_release_is_tagged_mac(self):
         self.assertPassed(self.release("--dmg", self.dmg(self.released)))
@@ -585,6 +681,15 @@ class BuildTests(Fixture):
         self.assertEqual([s for s in steps if s in text], steps)
         self.assertEqual(sorted(steps, key=text.index), steps, "notarized and stapled before the check and the tag")
         self.assertNotIn("/keys/AuthKey_TEST.p8", text.split("release-mac.py notarize")[0], "the key path only goes to notarize")
+        dmg = next(line for line in text.splitlines() if "release-mac.py dmg" in line)
+        # The setup guide and the window background come from the public checkout.
+        self.assertIn(f"--extra {out}/source/mac/dmg/Start Here.html", dmg)
+        self.assertIn(f"--background {out}/source/mac/dmg/background.svg", dmg)
+        # The stable name for releases/latest/download/VoxtMobile-Mac.dmg, and a versioned copy: same bytes, after stapling.
+        copies = [f"cp {out}/VoxtConnector.dmg {out}/VoxtMobile-Mac.dmg", f"cp {out}/VoxtConnector.dmg {out}/VoxtMobile-Mac-v2.0.0.dmg"]
+        for copy in copies:
+            self.assertIn(copy, text)
+            self.assertLess(text.index("release-gate.py check"), text.index(copy), "copied once the stapled DMG passed the check")
 
     def mac_build(self, *extra, env=None):
         return self.build(*self.local_args(), "--rev", self.released, "--version", "v2.0.0", "--mac", *extra,

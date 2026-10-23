@@ -5,6 +5,7 @@ Usage: python3 -I tools/test-release-mac.py [-v]
 Signing runs for real with the ad-hoc identity on small bundles under $TMPDIR. Notarization runs
 against a fake xcrun and spctl on PATH, so nothing is sent to Apple.
 """
+import contextlib
 import json
 import os
 import plistlib
@@ -18,6 +19,8 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
 MAC = TOOLS / "release-mac.py"
+# The pinned dmgbuild that release-mac.py installs (tools/dmg-requirements.txt).
+VENV = Path(os.environ.get("VOXT_DMGBUILD_VENV") or TOOLS.parent / "build/dmgbuild-venv")
 
 
 def tool(*args, env=None):
@@ -127,6 +130,98 @@ class SignTests(unittest.TestCase):
             self.assertTrue((Path(mount) / "Applications").is_symlink(), "drag-to-Applications link")
         finally:
             subprocess.run(["hdiutil", "detach", "-quiet", mount])
+
+
+@contextlib.contextmanager
+def mounted(dmg):
+    attached = subprocess.run(["hdiutil", "attach", "-plist", "-readonly", "-nobrowse", "-noautoopen", str(dmg)],
+                              capture_output=True, check=True)
+    mount = [e["mount-point"] for e in plistlib.loads(attached.stdout)["system-entities"] if "mount-point" in e][0]
+    try:
+        yield Path(mount)
+    finally:
+        subprocess.run(["hdiutil", "detach", "-quiet", mount])
+
+
+class DmgLayoutTests(unittest.TestCase):
+    """The DMG window: apps on the left, an arrow, Applications on the right, the guide below, on a background."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="release-dmg-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.apps = [bundle(self.tmp / "Voxt Omni Dev.app", "com.example.voxt"),
+                     bundle(self.tmp / "Voxt Connector.app", "com.example.connector")]
+        signed = tool("sign", "--identity", "-", "--no-timestamp", *self.apps)
+        self.assertEqual(signed.returncode, 0, signed.stdout + signed.stderr)
+        self.guide = self.tmp / "Start Here.html"
+        self.guide.write_text("<!doctype html><title>Start here</title>\n")
+        self.background = self.tmp / "background.svg"
+        self.background.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400">'
+                                   '<rect width="660" height="400" fill="#F7F6F2"/></svg>\n')
+        self.dmg = self.tmp / "out/Voxt Mobile.dmg"
+
+    def make(self, *extra):
+        result = tool("dmg", "--identity", "-", "--no-timestamp", "--volname", "Voxt Mobile", "--out", self.dmg,
+                      *extra, *self.apps)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Identifier=", details(self.dmg), "the DMG itself is signed")
+
+    def test_extra_files_sit_at_the_top_level_next_to_the_apps(self):
+        self.make("--extra", self.guide, "--background", self.background)
+        with mounted(self.dmg) as mount:
+            self.assertEqual((mount / "Start Here.html").read_text(), self.guide.read_text())
+            for app in self.apps:
+                self.assertTrue((mount / app.name / "Contents/MacOS/main").is_file())
+                verify = subprocess.run(["codesign", "--verify", "--strict", str(mount / app.name)], capture_output=True, text=True)
+                self.assertEqual(verify.returncode, 0, f"{app.name} keeps its signature: {verify.stderr}")
+            self.assertTrue((mount / "Applications").is_symlink(), "drag-to-Applications link")
+            self.assertEqual(os.readlink(mount / "Applications"), "/Applications")
+
+    def test_window_layout_puts_apps_left_applications_right_and_the_guide_below(self):
+        self.make("--extra", self.guide, "--background", self.background)
+        with mounted(self.dmg) as mount:
+            self.assertTrue((mount / ".DS_Store").is_file(), "Finder's window layout")
+            backgrounds = list(mount.glob(".background*"))
+            self.assertTrue(backgrounds, "a background picture: " + ", ".join(p.name for p in mount.iterdir()))
+            # Read the layout back with the same pinned ds_store that wrote it.
+            reader = subprocess.run([str(VENV / "bin/python"), "-I", "-c", """
+import json, sys
+from ds_store import DSStore
+with DSStore.open(sys.argv[1], "r") as store:
+    spots = {entry.filename: list(entry.value) for entry in store if entry.code == b"Iloc"}
+    view = store["."]["icvp"]
+print(json.dumps({"spots": spots, "background": view.get("backgroundType"), "alias": "backgroundImageAlias" in view}))
+""", str(mount / ".DS_Store")], capture_output=True, text=True, timeout=60)
+            self.assertEqual(reader.returncode, 0, reader.stderr)
+            layout = json.loads(reader.stdout)
+        spots = layout["spots"]
+        omni, connector = spots["Voxt Omni Dev.app"], spots["Voxt Connector.app"]
+        applications, guide = spots["Applications"], spots["Start Here.html"]
+        self.assertEqual(omni[1], connector[1], "the two apps side by side")
+        self.assertLess(max(omni[0], connector[0]), applications[0], "Applications to the right of both apps")
+        self.assertEqual(applications[1], omni[1], "on the same row as the apps")
+        self.assertGreater(guide[1], omni[1], "the guide below the row")
+        self.assertEqual(layout["background"], 2, "a picture background")
+        self.assertTrue(layout["alias"])
+
+    def test_the_only_volume_path_is_the_layouts_link_to_its_own_background(self):
+        # The release gate refuses local paths; Finder's background link names the DMG's own volume.
+        self.make("--extra", self.guide, "--background", self.background)
+        local = re.compile(rb"/(?:Users|Volumes)/[^\x00\n\r\"']*")
+        with mounted(self.dmg) as mount:
+            hits = {str(p.relative_to(mount)): [m.group() for m in local.finditer(p.read_bytes())]
+                    for p in mount.rglob("*") if p.is_file() and not p.is_symlink()}
+        hits = {name: found for name, found in hits.items() if found}
+        self.assertEqual(list(hits), [".DS_Store"], hits)
+        for found in hits[".DS_Store"]:
+            self.assertTrue(found.startswith(b"/" + b"Volumes/Voxt Mobile"), found)
+
+    def test_refuses_a_missing_extra_file(self):
+        result = tool("dmg", "--identity", "-", "--no-timestamp", "--volname", "Voxt Mobile", "--out", self.dmg,
+                      "--extra", self.tmp / "missing.html", *self.apps)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing.html", result.stdout + result.stderr)
+        self.assertFalse(self.dmg.exists())
 
 
 class NotarizeTests(unittest.TestCase):

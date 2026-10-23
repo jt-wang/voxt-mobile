@@ -4,4 +4,6 @@
 final class TestPreferences: ConnectorPreferences, @unchecked Sendable {
     var wasApproved = false
     var showsInDock = true
+    var setupGuideFinished = false
+    var setupPermissionsConfirmed = false
 }

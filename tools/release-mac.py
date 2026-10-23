@@ -5,8 +5,12 @@
       Signs every nested helper, bundle and the app itself, inside out, with the hardened runtime and
       a secure timestamp, keeping entitlements except get-task-allow (the notary service refuses it). Then checks the signature, the team of every signed
       piece, and REQ (a code requirement such as the one Voxt checks before it trusts the Connector).
-  release-mac.py dmg --identity ID --volname NAME --out DMG [--no-timestamp] APP...
-      Puts the signed apps and an Applications link on a compressed DMG and signs the DMG.
+  release-mac.py dmg --identity ID --volname NAME --out DMG [--extra FILE]... [--background SVG] [--no-timestamp] APP...
+      Puts the signed apps, an Applications link and each --extra file (such as a setup guide) at the top of a
+      compressed DMG and signs the DMG. The window shows the apps on the left, Applications on the right and the
+      extra files below, on the --background picture (an SVG drawn for the WINDOW layout below, or a PNG).
+      The layout is written by the pinned dmgbuild (tools/dmg-requirements.txt) in build/dmgbuild-venv, which this
+      creates on first use; VOXT_DMGBUILD_VENV names another folder. No Finder or AppleScript is involved.
   release-mac.py notarize DMG --log FILE
       xcrun notarytool submit --wait with the App Store Connect API key in VOXT_NOTARY_KEY (path),
       VOXT_NOTARY_KEY_ID and VOXT_NOTARY_ISSUER; on Accepted, staples the ticket and requires Gatekeeper
@@ -26,6 +30,16 @@ from pathlib import Path
 
 BUNDLES = (".app", ".appex", ".framework", ".xpc", ".bundle")
 MACHO = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"}
+
+
+ROOT = Path(__file__).resolve().parents[1]
+REQUIREMENTS = Path(__file__).resolve().parent / "dmg-requirements.txt"
+# The DMG window, in points. mac/dmg/background.svg draws its line and arrow for these spots.
+WINDOW = (660, 400)
+APP_SPOTS = [(110, 175), (250, 175)]  # further apps continue the row
+APPLICATIONS_SPOT = (540, 175)
+EXTRA_SPOTS = [(330, 315)]  # further extras continue the row
+ICON_SIZE = 88
 
 
 class Refused(Exception):
@@ -126,19 +140,75 @@ def sign(args):
             print(f"{app.name} satisfies {args.requirement}")
 
 
+def dmgbuild():
+    """The pinned dmgbuild in a venv under build/, installed with hash checks on first use."""
+    venv = Path(os.environ.get("VOXT_DMGBUILD_VENV") or ROOT / "build/dmgbuild-venv")
+    exe = venv / "bin/dmgbuild"
+    if not exe.is_file():
+        result = run(sys.executable, "-m", "venv", venv)
+        if result.returncode != 0:
+            raise Refused(f"python3 -m venv {venv} failed: {result.stderr.strip()}")
+        result = run(venv / "bin/python", "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
+                     "--require-hashes", "-r", REQUIREMENTS, timeout=600)
+        if result.returncode != 0 or not exe.is_file():
+            raise Refused(f"installing dmgbuild into {venv} failed: {(result.stdout + result.stderr).strip()[-2000:]}")
+    return exe
+
+
+def spots(start, count, step=140):
+    return [(start[0] + step * i, start[1]) for i in range(count)]
+
+
+def background_png(source, scratch):
+    """The window background as PNG; an SVG is drawn at 1x and 2x (dmgbuild joins name@2x.png for Retina)."""
+    if source.suffix.lower() == ".png":
+        return source
+    if source.suffix.lower() != ".svg":
+        raise Refused(f"--background must be an .svg or .png file: {source.name}")
+    png = scratch / "background.png"
+    for scale, out in ((1, png), (2, scratch / "background@2x.png")):
+        result = run("sips", "-s", "format", "png", "-z", WINDOW[1] * scale, WINDOW[0] * scale, source, "--out", out)
+        if result.returncode != 0 or not out.is_file():
+            raise Refused(f"drawing {source.name} failed: {(result.stdout + result.stderr).strip()}")
+    return png
+
+
 def dmg(args):
     out = Path(args.out)
+    apps = [Path(a).resolve() for a in args.apps]
+    extras = [Path(e).resolve() for e in args.extra]
+    for path in apps:
+        if not path.is_dir():
+            raise Refused(f"{path.name} is not an app bundle")
+    for path in extras:
+        if not path.is_file():
+            raise Refused(f"--extra {path.name} is not a file")
+    names = [p.name for p in apps + extras] + ["Applications"]
+    if len(set(names)) != len(names):
+        raise Refused("two items on the DMG would have the same name: " + ", ".join(names))
     out.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as staging:
-        for app in map(Path, args.apps):
-            result = run("ditto", app, Path(staging) / app.name)
-            if result.returncode != 0:
-                raise Refused(f"copying {app.name} failed: {result.stderr.strip()}")
-        os.symlink("/Applications", Path(staging) / "Applications")
-        result = run("hdiutil", "create", "-quiet", "-ov", "-fs", "HFS+", "-format", "UDZO", "-volname", args.volname,
-                     "-srcfolder", staging, out)
-        if result.returncode != 0:
-            raise Refused(f"hdiutil create failed: {result.stderr.strip()}")
+    with tempfile.TemporaryDirectory() as scratch:
+        scratch = Path(scratch)
+        icon_locations = {**dict(zip((p.name for p in apps), spots(APP_SPOTS[0], len(apps)))),
+                          "Applications": APPLICATIONS_SPOT,
+                          **dict(zip((p.name for p in extras), spots(EXTRA_SPOTS[0], len(extras))))}
+        settings = {
+            "files": [str(p) for p in apps + extras],
+            "symlinks": {"Applications": "/Applications"},
+            "format": "UDZO",
+            "filesystem": "HFS+",
+            "window_rect": ((200, 120), WINDOW),
+            "icon_size": ICON_SIZE,
+            "text_size": 13,
+            "icon_locations": icon_locations,
+            "background": str(background_png(Path(args.background).resolve(), scratch)) if args.background else None,
+        }
+        settings_file = scratch / "settings.py"
+        settings_file.write_text("".join(f"{key} = {value!r}\n" for key, value in settings.items()))
+        out.unlink(missing_ok=True)
+        result = run(dmgbuild(), "-s", settings_file, args.volname, out, timeout=900, cwd=scratch)
+        if result.returncode != 0 or not out.is_file():
+            raise Refused(f"dmgbuild failed: {(result.stdout + result.stderr).strip()[-2000:]}")
     timestamp = "--timestamp=none" if args.no_timestamp else "--timestamp"
     result = run("codesign", "--force", timestamp, "--sign", args.identity, out)
     if result.returncode != 0:
@@ -205,6 +275,8 @@ def main():
     command.add_argument("--identity", required=True)
     command.add_argument("--volname", required=True)
     command.add_argument("--out", required=True)
+    command.add_argument("--extra", action="append", default=[], help="a file for the top level of the DMG (repeatable)")
+    command.add_argument("--background", help="window background picture (.svg drawn for WINDOW, or .png)")
     command.add_argument("--no-timestamp", action="store_true")
     command.add_argument("apps", nargs="+")
     command = commands.add_parser("notarize")

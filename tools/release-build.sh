@@ -11,8 +11,9 @@
 # iOS (default) signs for App Store Connect: VOXT_TEAM_ID, VOXT_PROFILE_APP, VOXT_PROFILE_KEYBOARD
 # (provisioning profile names), and VOXT_SIGNING_LOCAL, the official build's Signing.local.xcconfig: the
 # public source has only neutral IDs, so the release's bundle IDs and Keychain names come from that file. Mac builds Voxt Connector (plus any --mac-app, such as Voxt Omni Dev), signs
-# every app with VOXT_DEVELOPER_ID ("Developer ID Application: Name (TEAM)"), puts them on a signed DMG and
-# notarizes it with the App Store Connect key in VOXT_NOTARY_KEY, VOXT_NOTARY_KEY_ID and VOXT_NOTARY_ISSUER.
+# every app with VOXT_DEVELOPER_ID ("Developer ID Application: Name (TEAM)"), puts them and the Start Here guide
+# (mac/dmg) on a signed DMG and notarizes it with the App Store Connect key in VOXT_NOTARY_KEY, VOXT_NOTARY_KEY_ID
+# and VOXT_NOTARY_ISSUER. The DMG is then copied to VoxtMobile-Mac.dmg and VoxtMobile-Mac-vX.Y.Z.dmg for upload.
 # The Connector gets the neutral bundle ID of mac/VoxtConnector/Config/Signing.shared.xcconfig, or
 # VOXT_CONNECTOR_BUNDLE_ID from VOXT_CONNECTOR_SIGNING_LOCAL, the official build's private xcconfig, so
 # installed Connectors keep their ID; every --mac-app Voxt must trust that ID (VoxtConnectorBundleIdentifier).
@@ -133,10 +134,15 @@ if (( mac )); then
   for extra in ${mac_apps[@]+"${mac_apps[@]}"}; do
     run python3 -I "$here/release-mac.py" sign --identity "$VOXT_DEVELOPER_ID" --team "$team" --strip-debug "$extra"
   done
+  # The setup guide and the window background come from the public checkout.
   run python3 -I "$here/release-mac.py" dmg --identity "$VOXT_DEVELOPER_ID" --volname "Voxt Mobile" \
-    --out "$out/VoxtConnector.dmg" "$app" ${mac_apps[@]+"${mac_apps[@]}"}
+    --out "$out/VoxtConnector.dmg" --extra "$src/mac/dmg/Start Here.html" --background "$src/mac/dmg/background.svg" \
+    "$app" ${mac_apps[@]+"${mac_apps[@]}"}
   run python3 -I "$here/release-mac.py" notarize "$out/VoxtConnector.dmg" --log "$out/notarization.json"
   run python3 -I "$here/release-gate.py" check "$out/VoxtConnector.dmg" --version "$version" "${check_mode[@]}"
+  # Upload names: VoxtMobile-Mac.dmg keeps .../releases/latest/download/VoxtMobile-Mac.dmg on the newest release.
+  run cp "$out/VoxtConnector.dmg" "$out/VoxtMobile-Mac.dmg"
+  run cp "$out/VoxtConnector.dmg" "$out/VoxtMobile-Mac-$version.dmg"
 fi
 release=(--version "$version" --notes "$out/release-notes-$version.md")
 (( ios )) && release+=(--build "$build" --ipa "$out/export-$build/VoxtMobile.ipa")

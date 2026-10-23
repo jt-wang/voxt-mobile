@@ -122,6 +122,14 @@ public struct ConnectorLink: ConnectorAuthorizing {
         throw Failure.voxtNotRunning
     }
 
+    /// Whether a Voxt accepts a connection on one of its socket paths. Voxt opens the socket only
+    /// while its Local API is on. Nothing is sent, so Voxt reads end of file and shows no dialog.
+    public static func voxtAnswers(paths: [String] = socketPaths()) -> Bool {
+        guard let fd = try? connectToVoxt(paths: paths) else { return false }
+        close(fd)
+        return true
+    }
+
     public static func connectToVoxt(path: String) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw Failure.voxtNotRunning }

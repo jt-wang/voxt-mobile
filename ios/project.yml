@@ -13,7 +13,7 @@ configFiles:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.1.3"
+    MARKETING_VERSION: "0.1.5"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
 packages:

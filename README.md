@@ -7,6 +7,12 @@ A voice keyboard for your phone. Your own Mac turns your words into clean text.
 Tap the mic in any app, speak, and the text appears in the field you were typing in. The speech and text models are open source and run on your Mac.
 
 <p align="center">
+  <a href="https://testflight.apple.com/join/ddn8Mz84"><img src="docs/images/testflight-beta.svg" width="232" alt="Join the TestFlight beta"></a>
+  &nbsp;
+  <a href="https://github.com/jt-wang/voxt-mobile/releases/latest/download/VoxtMobile-Mac.dmg"><img src="docs/images/download-mac.svg" width="212" alt="Download for Mac"></a>
+</p>
+
+<p align="center">
   <img src="docs/images/keyboard-try-it.png" width="300" alt="The Voxt keyboard: the dictated sentence is in the field, with the mic, the pen and Undo">
   &nbsp;&nbsp;
   <img src="docs/images/connector.png" width="360" alt="Voxt Connector on the Mac: Ready for dictation, connected to Voxt 1.16">
@@ -31,7 +37,7 @@ It is built on [Voxt](https://github.com/sgl-project/sglang-omni/tree/main/Voxt)
 
 **On your Mac** (Apple silicon, macOS 26.2 or later)
 
-1. Download the **VoxtMobile-Mac** DMG from the [latest release](https://github.com/jt-wang/voxt-mobile/releases/latest). Drag both apps into Applications: **Voxt Omni Dev** (Voxt with the phone feature) and **Voxt Connector**.
+1. Download [VoxtMobile-Mac.dmg](https://github.com/jt-wang/voxt-mobile/releases/latest/download/VoxtMobile-Mac.dmg). Drag both apps into Applications: **Voxt Omni Dev** (Voxt with the phone feature) and **Voxt Connector**.
 2. Open Voxt Omni Dev, choose a speech model and a text model, then turn on Settings › General › Local API › Allow other apps to dictate through Voxt. If macOS asks for permissions, allow them.
 3. Open Voxt Connector (it lives in the menu bar). Choose Allow when it asks to connect to Voxt, then choose **Add iPhone**. It shows a QR code.
 
@@ -66,11 +72,11 @@ The text is inserted only if the text field still matches the one you dictated i
 Every app we ship is built from a public commit in this repo, and you can check which one.
 
 - **iPhone:** Settings › About › Source code shows the commit the app was built from. Open `https://github.com/jt-wang/voxt-mobile/commit/<commit>` to read that exact code (a build of your own links to the `VOXT_SOURCE_URL` in your `Signing.local.xcconfig`). Get the Mac apps, on the first screen and the pairing screen, opens the `VOXT_SITE_URL` from the same file. On [Releases](https://github.com/jt-wang/voxt-mobile/releases), the matching release is tagged `v1.2.3+<build>`, and its notes list the same commit and iOS build number.
-- **Mac:** the release notes give the SHA-256 of `VoxtConnector.dmg`. Check that your download matches and that Apple notarized it:
+- **Mac:** the release notes give the SHA-256 of `VoxtMobile-Mac.dmg`. Check that your download matches and that Apple notarized it:
 
   ```sh
-  shasum -a 256 VoxtConnector.dmg
-  spctl -a -t open --context context:primary-signature -vv VoxtConnector.dmg
+  shasum -a 256 VoxtMobile-Mac.dmg
+  spctl -a -t open --context context:primary-signature -vv VoxtMobile-Mac.dmg
   ```
 
   `spctl` should print `accepted` and `source=Notarized Developer ID`. Once installed, `defaults read "/Applications/Voxt Connector.app/Contents/Info" VoxtSourceRevision` prints the app's commit, and `spctl -a -vv "/Applications/Voxt Connector.app"` checks the app itself.

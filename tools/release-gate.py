@@ -8,11 +8,14 @@
                          [--branch main] [--require-remote] [--version v1.2.3]
       Reads VoxtSourceRevision from every app and extension in each .ipa, .dmg or bundle folder,
       checks that commit, and fails on any absolute path into a home folder or a mounted disk in any file.
+      The one exception: a DMG's root .DS_Store may name the DMG's own volume (Finder's window background link).
       With --version, every app and extension must also be version 1.2.3 (CFBundleShortVersionString),
       except a Voxt build (one with VoxtUpstreamRevision), which keeps Voxt's own version.
   release-gate.py release --version v1.2.3 [--build N --ipa IPA] [--dmg DMG] --notes FILE --tagger "Name <email>" (mode)
       Runs the same check against that version, then makes an annotated tag v1.2.3+N (v1.2.3+mac without an IPA) on the commit
-      in the public repo (the mirror, or REPO in local mode) and writes a release notes draft. Pushes nothing.
+      in the public repo (the mirror, or REPO in local mode) and writes a release notes draft: the README's Install
+      steps (download link pinned to this version), the CHANGELOG section of this version, then the build facts.
+      Refuses before tagging when either section is missing. Pushes nothing.
 
 Remote mode fetches the public repo into a bare mirror (default build/release-source/public.git)
 and requires the commit on its public branch. Local mode is for releases before the first push:
@@ -45,6 +48,8 @@ CONFIG = Path(__file__).resolve().parent / "release-gate.toml"
 # Debug symbols at the IPA root go to Apple for crash reports and are never installed on a device, so build paths
 # in them reveal nothing to the public. Only this exact place is exempt.
 APPLE_SYMBOLS = re.compile(r"Symbols/[^/]+\.symbols")
+# The release DMG is also attached under this name, so .../releases/latest/download/VoxtMobile-Mac.dmg is the newest.
+STABLE_DMG = "VoxtMobile-Mac.dmg"
 
 
 def load_prebuilt(path):
@@ -176,8 +181,9 @@ def checkout(public, commit, folder):
         raise Refused(f"{folder} has changes ({count} paths, ignored build output included); use an empty folder")
 
 
-def bundles_and_files(artifact):
-    """Yields (relative name, bytes) for every file in an .ipa, .dmg or folder."""
+def bundles_and_files(artifact, volumes=None):
+    """Yields (relative name, bytes) for every file in an .ipa, .dmg or folder. For a .dmg, volumes (a dict) gets
+    the volume's name, which a window layout may name (own_volume_path)."""
     artifact = Path(artifact)
     if artifact.is_dir():
         yield from folder_files(artifact)
@@ -195,12 +201,33 @@ def bundles_and_files(artifact):
         mounts = [e["mount-point"] for e in plistlib.loads(attached.stdout)["system-entities"] if "mount-point" in e]
         try:
             for mount in mounts:
+                if volumes is not None:
+                    volumes[str(artifact)] = volume_name(mount)
                 yield from folder_files(Path(mount))
         finally:
             for mount in mounts:
                 subprocess.run(["hdiutil", "detach", "-quiet", mount], timeout=120)
     else:
         raise Refused(f"{artifact.name}: expected an .ipa, a .dmg or a folder")
+
+
+def volume_name(mount):
+    shown = subprocess.run(["diskutil", "info", "-plist", mount], capture_output=True, timeout=60)
+    try:
+        return plistlib.loads(shown.stdout).get("VolumeName") if shown.returncode == 0 else None
+    except plistlib.InvalidFileException:
+        return None
+
+
+def own_volume_path(name, found, volume):
+    """True for the one local path a DMG may hold: in the root .DS_Store, Finder's link to the window background
+    names the DMG's own volume (its mount point, named after the volume), followed by binary data (dmgbuild writes it while the image
+    is mounted under its name). Anything after the name that could continue a path is refused."""
+    if name != ".DS_Store" or not volume:
+        return False
+    own = b"/" + b"Volumes/" + volume.encode()  # split so this source holds no local-looking path
+    rest = found[len(own):]
+    return found.startswith(own) and (not rest or not 0x20 <= rest[0] < 0x7f)
 
 
 def folder_files(folder):
@@ -229,9 +256,10 @@ def inspect(public, artifacts, require_remote=False, prebuilt=None, version=None
     if require_remote and public.local:
         raise Refused("--require-remote: this upload needs the commit on the public remote, not local mode")
     problems, revisions = [], {}
+    volumes, layouts = {}, []
     for artifact in artifacts:
         found = False
-        for name, data in bundles_and_files(artifact):
+        for name, data in bundles_and_files(artifact, volumes):
             # An app inside a framework (Sparkle's Updater.app) is that framework's code, not ours.
             owner = None if framework_of(name) else is_bundle_info(name)
             if owner:
@@ -260,7 +288,11 @@ def inspect(public, artifacts, require_remote=False, prebuilt=None, version=None
             entry = prebuilt.get(framework_of(name))
             hits = 0
             for match in LOCAL_PATH.finditer(data):
-                if entry and any(match.group().startswith(p.encode()) for p in entry["allow"]):
+                if own_volume_path(name, match.group(), volumes.get(str(artifact))):
+                    layout = f"{Path(artifact).name}: .DS_Store names its own volume, {volumes[str(artifact)]}"
+                    if layout not in layouts:
+                        layouts.append(layout)
+                elif entry and any(match.group().startswith(p.encode()) for p in entry["allow"]):
                     allowed[entry["framework"]] = allowed.get(entry["framework"], 0) + 1
                 else:
                     hits += 1
@@ -287,6 +319,8 @@ def inspect(public, artifacts, require_remote=False, prebuilt=None, version=None
     if expected:
         lines.append(f"version: {', '.join(versioned)} at {expected}"
                      + (f"; {', '.join(upstream)} is Voxt's own version ({UPSTREAM_KEY})" if upstream else ""))
+    for layout in layouts:
+        lines.append(f"layout: {layout} (Finder's link to the window background), allowed")
     if skipped:
         lines.append(f"skipped: {skipped} Symbols/*.symbols at the IPA root (debug data for Apple's crash reports, never installed on a device)")
     used = [prebuilt[name] for name in sorted(allowed)]
@@ -311,6 +345,33 @@ def check(args):
     inspect(Public(args), args.artifacts, args.require_remote, load_prebuilt(args.config), args.version)
 
 
+def section(text, heading, stop):
+    """The lines under `heading` up to the next line starting with one of `stop`, trimmed; None if absent."""
+    lines = text.splitlines()
+    if heading not in lines:
+        return None
+    body = []
+    for line in lines[lines.index(heading) + 1:]:
+        if line.startswith(stop):
+            break
+        body.append(line)
+    return "\n".join(body).strip("\n")
+
+
+def notes_sections(public, commit, version):
+    """From the released commit: the README's Install steps, with the latest-download link pinned to this
+    release, and the CHANGELOG section of this version."""
+    readme = git("show", f"{commit}:README.md", cwd=public.repo, check=False)
+    install = section(readme.stdout, "## Install", ("## ", "### ")) if readme.returncode == 0 else None
+    if not install:
+        raise Refused(f"README.md at {commit[:12]} has no ## Install section for the release notes")
+    changelog = git("show", f"{commit}:CHANGELOG.md", cwd=public.repo, check=False)
+    news = section(changelog.stdout, f"## {version}", ("## ",)) if changelog.returncode == 0 else None
+    if not news:
+        raise Refused(f"CHANGELOG.md at {commit[:12]} has no ## {version} section for the release notes")
+    return install.replace("/releases/latest/download/", f"/releases/download/{version}/"), news
+
+
 def release(args):
     """After the check passes: an annotated tag on the public commit and a release notes draft. Pushes nothing."""
     release_version(args.version)
@@ -324,6 +385,7 @@ def release(args):
         raise Refused("--ipa needs --build N, the iOS build number")
     public = Public(args)
     commit, lines, used = inspect(public, artifacts, args.require_remote, load_prebuilt(args.config), args.version)
+    install, news = notes_sections(public, commit, args.version)
     tag = f"{args.version}+{args.build}" if args.ipa else f"{args.version}+mac"
     if git("rev-parse", "--verify", "-q", f"refs/tags/{tag}", cwd=public.repo, check=False).returncode == 0:
         raise Refused(f"tag {tag} already exists in {public.repo}")
@@ -341,16 +403,18 @@ def release(args):
         raise Refused(f"git tag failed: {result.stderr.strip()}")
     notes = Path(args.notes)
     notes.parent.mkdir(parents=True, exist_ok=True)
+    downloads = ([f"- The same file is attached as `{STABLE_DMG}`, the name the latest-download link uses, and as "
+                  f"`{STABLE_DMG.removesuffix('.dmg')}-{args.version}.dmg`."] if args.dmg else [])
     notes.write_text("\n".join([
-        f"# Voxt Mobile {args.version}", "", "Draft release notes. Nothing has been posted.", "",
-        "## What's new", "", "- (fill in)", "", "## Build", "", *[f"- {fact}" for fact in facts], f"- Tag: `{tag}`", "",
+        f"# Voxt Mobile {args.version}", "", "## Install", "", install, "", "## What's new", "", news, "",
+        "## Build", "", *[f"- {fact}" for fact in facts], *downloads, f"- Tag: `{tag}`", "",
         *(["## Prebuilt third-party code", "",
            "These frameworks ship as their projects' own prebuilt binaries, not built from this repo:", "",
            *[f"- `{e['framework']}`: {e['project']}, version {e['version']}, {e['url']} (SHA-256 {e['sha256']})" for e in used],
            ""] if used else []),
         "To check that this release matches its source, see How to verify a release in the README.", "",
         "## Release gate", "", "```", *lines, "```", ""]))
-    print(f"tagged {tag} on {commit} in {public.repo} (not pushed); notes: {notes}")
+    print(f"tagged {tag} on {commit} in {public.repo} (not pushed); release notes draft, nothing posted: {notes}")
     print(f"push when the public repo is ready: git -C {public.repo} push origin refs/tags/{tag}")
 
 

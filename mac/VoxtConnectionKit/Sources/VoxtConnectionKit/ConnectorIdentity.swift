@@ -24,3 +24,28 @@ public enum ConnectorIdentity {
         !text.isEmpty && text.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }
     }
 }
+
+/// Where the setup guide sends people for the iPhone app: `VoxtIPhoneAppURL` in Info.plist (build
+/// setting `VOXT_IPHONE_APP_URL`), else the upstream setup steps, which say how to build it.
+/// xcconfig reads `//` as a comment, so the setting has no scheme; https is added.
+public struct ConnectorIPhoneApp: Equatable, Sendable {
+    public static let infoKey = "VoxtIPhoneAppURL"
+    public static let setupSteps = URL(string: "https://github.com/sgl-project/sglang-omni/tree/main/Voxt/Mobile#set-it-up")!
+
+    public let url: URL
+    public var isSetupSteps: Bool { url == Self.setupSteps }
+    /// The address without its scheme, as the guide prints it.
+    public var shownAddress: String {
+        let text = url.absoluteString
+        return text.range(of: "://").map { String(text[$0.upperBound...]) } ?? text
+    }
+
+    public init(info: [String: Any]? = Bundle.main.infoDictionary) {
+        guard var text = info?[Self.infoKey] as? String, !text.isEmpty, !text.contains("$(") else {
+            url = Self.setupSteps; return
+        }
+        if !text.contains("://") { text = "https://" + text }
+        while text.hasSuffix("/") { text.removeLast() }
+        url = URL(string: text) ?? Self.setupSteps
+    }
+}

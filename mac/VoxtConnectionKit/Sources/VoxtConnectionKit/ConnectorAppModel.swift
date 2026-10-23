@@ -50,6 +50,7 @@ public struct ConnectorPhoneRequest: Identifiable, Equatable, Sendable {
     @ObservationIgnored private let runtimeURL: URL
     @ObservationIgnored private let store: any ConnectorConfigurationStore
     @ObservationIgnored private let health: (Int, String) async throws -> LocalInferenceClient.Health
+    @ObservationIgnored private let capabilities: (Int, String) async throws -> LocalInferenceClient.Capabilities
     @ObservationIgnored private let authorizer: (any ConnectorAuthorizing)?
     @ObservationIgnored private var authorizationGeneration = UUID()
     @ObservationIgnored private var authorizationTask: Task<ConnectorGrant, Error>?
@@ -69,13 +70,19 @@ public struct ConnectorPhoneRequest: Identifiable, Equatable, Sendable {
                 health: @escaping (Int, String) async throws -> LocalInferenceClient.Health = { port, token in
                     let url = URL(string: "http://127.0.0.1:\(port)")!
                     return try await LocalInferenceClient(baseURL: url, token: token).health()
-                }, makePairingRuntime: (() -> any ConnectorPairingRuntime)? = nil,
+                },
+                capabilities: @escaping (Int, String) async throws -> LocalInferenceClient.Capabilities = { port, token in
+                    let url = URL(string: "http://127.0.0.1:\(port)")!
+                    return try await LocalInferenceClient(baseURL: url, token: token).capabilities()
+                },
+                makePairingRuntime: (() -> any ConnectorPairingRuntime)? = nil,
                 authorizer: (any ConnectorAuthorizing)? = ConnectorLink(),
                 preferences: any ConnectorPreferences = UserDefaultsConnectorPreferences(),
                 loginItem: (any ConnectorLoginItem)? = nil,
                 sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
                 makeLocalPairing: (@MainActor (URL, Date, @escaping @Sendable (String, String) async -> Bool) throws -> any ConnectorLocalPairing)? = nil) {
-        self.runtimeURL = runtimeURL; self.store = store; self.health = health; self.authorizer = authorizer
+        self.runtimeURL = runtimeURL; self.store = store; self.health = health; self.capabilities = capabilities
+        self.authorizer = authorizer
         self.preferences = preferences; self.loginItem = loginItem ?? MainAppLoginItem(); self.sleep = sleep
         self.makeLocalPairing = makeLocalPairing ?? { try AdvertisedLocalPairing(invitation: $0, expiresAt: $1, onRequest: $2) }
         self.makePairingRuntime = makePairingRuntime ?? {
@@ -224,6 +231,16 @@ public struct ConnectorPhoneRequest: Identifiable, Equatable, Sendable {
             if remember { preferences.wasApproved = true }
         default: break
         }
+    }
+
+    /// Phones allowed to connect, from the saved phone list.
+    public var pairedPhoneCount: Int { (try? store.load().allowedClients.count) ?? 0 }
+
+    /// The models Voxt reports, read with the credential of the current connection; nil when not
+    /// connected or when the read fails.
+    public func modelStatus() async -> ConnectorModelStatus? {
+        guard isConnected, let authenticated else { return nil }
+        return try? await capabilities(authenticated.port, authenticated.token).models
     }
 
     public var opensAtLogin: Bool { loginItemStatus == .enabled }

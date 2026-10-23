@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <!-- The Voxt Mobile DMG window. tools/release-mac.py places the apps at (110,175) and (250,175),
+       Applications at (540,175) and Start Here.html at (330,315); this picture sits behind them. -->
+  <rect width="660" height="400" fill="#F7F6F2"/>
+  <text x="330" y="72" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="20" fill="#171717"
+        text-anchor="middle">Drag both apps to Applications</text>
+  <path d="M338 175 H452" stroke="#171717" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M440 163 L456 175 L440 187" stroke="#171717" stroke-width="3" fill="none" stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <path d="M40 262 H620" stroke="#E0DED6" stroke-width="1"/>
+</svg>

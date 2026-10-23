@@ -7,6 +7,10 @@ public protocol ConnectorPreferences: AnyObject, Sendable {
     var wasApproved: Bool { get set }
     /// The Connector shows a Dock icon. Off: only the menu bar item opens it.
     var showsInDock: Bool { get set }
+    /// The setup guide reached its last screen once, so it no longer opens at launch.
+    var setupGuideFinished: Bool { get set }
+    /// The user clicked Done on the guide's permissions step.
+    var setupPermissionsConfirmed: Bool { get set }
 }
 
 public final class UserDefaultsConnectorPreferences: ConnectorPreferences, @unchecked Sendable {
@@ -20,6 +24,14 @@ public final class UserDefaultsConnectorPreferences: ConnectorPreferences, @unch
     public var showsInDock: Bool {
         get { defaults.object(forKey: "connectorShowsInDock") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "connectorShowsInDock") }
+    }
+    public var setupGuideFinished: Bool {
+        get { defaults.bool(forKey: "connectorSetupGuideFinished") }
+        set { defaults.set(newValue, forKey: "connectorSetupGuideFinished") }
+    }
+    public var setupPermissionsConfirmed: Bool {
+        get { defaults.bool(forKey: "connectorSetupPermissionsConfirmed") }
+        set { defaults.set(newValue, forKey: "connectorSetupPermissionsConfirmed") }
     }
 }
 

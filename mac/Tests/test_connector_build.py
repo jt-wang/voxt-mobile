@@ -149,6 +149,54 @@ class ConnectorBuildTests(unittest.TestCase):
         self.assertIn("VOXT_CONNECTOR_BUNDLE_ID=com.example.c", command)
         self.assertIn("CODE_SIGNING_ALLOWED=NO", command)
 
+    def test_iphone_app_link_comes_only_from_a_private_setting(self):
+        # The official link lives only in the uncommitted signing file; without one the build keeps
+        # the upstream setup steps from Signing.shared.xcconfig.
+        builder = self._builder()
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertIsNone(builder.iphone_app_url(self._config(folder), env={}))
+        with tempfile.TemporaryDirectory() as folder:
+            config = self._config(
+                folder, "VOXT_IPHONE_APP_URL = beta.example.com/join/local // ours\n"
+            )
+            self.assertEqual(
+                builder.iphone_app_url(config, env={}), "beta.example.com/join/local"
+            )
+            release = Path(folder) / "release.xcconfig"
+            release.write_text("VOXT_IPHONE_APP_URL = beta.example.com/join/release\n")
+            self.assertEqual(
+                builder.iphone_app_url(
+                    config, env={"VOXT_CONNECTOR_SIGNING_LOCAL": str(release)}
+                ),
+                "beta.example.com/join/release",
+            )
+            release.write_text("VOXT_CONNECTOR_BUNDLE_ID = com.example.c\n")
+            self.assertIsNone(
+                builder.iphone_app_url(
+                    config, env={"VOXT_CONNECTOR_SIGNING_LOCAL": str(release)}
+                )
+            )
+        config = ROOT / "mac/VoxtConnector/Config"
+        shared = (config / "Signing.shared.xcconfig").read_text()
+        self.assertIn(
+            "VOXT_IPHONE_APP_URL = github.com/sgl-project/sglang-omni/tree/main/Voxt/Mobile#set-it-up\n",
+            shared,
+        )
+
+    def test_build_passes_the_iphone_app_link_only_when_set(self):
+        builder = self._builder()
+        plain = builder.xcodebuild_command(
+            Path("/d"), Path("/e.xcresult"), "com.example.c"
+        )
+        self.assertFalse(any(a.startswith("VOXT_IPHONE_APP_URL=") for a in plain))
+        named = builder.xcodebuild_command(
+            Path("/d"),
+            Path("/e.xcresult"),
+            "com.example.c",
+            iphone_app="beta.example.com/x",
+        )
+        self.assertIn("VOXT_IPHONE_APP_URL=beta.example.com/x", named)
+
     def test_builder_signs_runtime_then_app_with_timeout(self):
         spec = importlib.util.spec_from_file_location(
             "connector_build", ROOT / "tools/build-connector.py"

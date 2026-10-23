@@ -1,3 +1,6 @@
 // Copy to Signing.local.xcconfig (not committed). A build that already has users keeps the ID
 // they installed: macOS keys the Connector's settings and login item by it.
 VOXT_CONNECTOR_BUNDLE_ID = com.example.VoxtConnector
+// Where the setup guide sends people for the Voxt iPhone app, such as your TestFlight beta. Without it
+// the guide links to the setup steps. No scheme.
+// VOXT_IPHONE_APP_URL = example.com/voxt-iphone

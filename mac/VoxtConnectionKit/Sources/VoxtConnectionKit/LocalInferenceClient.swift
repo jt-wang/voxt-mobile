@@ -6,6 +6,11 @@ public struct LocalInferenceClient: Sendable {
         public var app: String
         public var version: String
     }
+    /// The part of `GET /v1/capabilities` Connector reads. Older Voxt sends no `models`.
+    public struct Capabilities: Decodable, Equatable, Sendable {
+        public var models: ConnectorModelStatus?
+        public init(models: ConnectorModelStatus?) { self.models = models }
+    }
     public enum Failure: Error, Equatable { case invalidEndpoint, unauthorized, unavailable, invalidResponse }
     private let baseURL: URL
     private let token: String
@@ -24,7 +29,16 @@ public struct LocalInferenceClient: Sendable {
     }
 
     public func health() async throws -> Health {
-        var request = URLRequest(url: baseURL.appending(path: "v1/health"))
+        let health: Health = try await get("v1/health")
+        guard health.app == "Voxt", !health.version.isEmpty else { throw Failure.invalidResponse }
+        guard health.ok else { throw Failure.unavailable }
+        return health
+    }
+
+    public func capabilities() async throws -> Capabilities { try await get("v1/capabilities") }
+
+    private func get<Body: Decodable>(_ path: String) async throws -> Body {
+        var request = URLRequest(url: baseURL.appending(path: path))
         request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 5
         let data: Data
@@ -38,11 +52,8 @@ public struct LocalInferenceClient: Sendable {
         guard let http = response as? HTTPURLResponse else { throw Failure.invalidResponse }
         if http.statusCode == 401 || http.statusCode == 403 { throw Failure.unauthorized }
         if http.statusCode >= 500 { throw Failure.unavailable }
-        guard http.statusCode == 200,
-              let health = try? JSONDecoder().decode(Health.self, from: data),
-              health.app == "Voxt", !health.version.isEmpty else { throw Failure.invalidResponse }
-        guard health.ok else { throw Failure.unavailable }
-        return health
+        guard http.statusCode == 200, let body = try? JSONDecoder().decode(Body.self, from: data) else { throw Failure.invalidResponse }
+        return body
     }
 }
 

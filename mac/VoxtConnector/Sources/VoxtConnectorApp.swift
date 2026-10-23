@@ -1,5 +1,4 @@
 import SwiftUI
-import CoreImage.CIFilterBuiltins
 import ServiceManagement
 import VoxtConnectionKit
 import os
@@ -45,7 +44,7 @@ struct VoxtConnectorApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            ConnectorMenu(model: model, dock: delegate.dock)
+            ConnectorMenu(model: model, dock: delegate.dock, openGuide: { delegate.showSetupGuide(model: model) })
         } label: {
             ConnectorMenuLabel(model: model, dock: delegate.dock, delegate: delegate)
         }
@@ -56,6 +55,9 @@ struct VoxtConnectorApp: App {
 private final class SessionPreferences: ConnectorPreferences, @unchecked Sendable {
     var wasApproved = false
     var showsInDock = true
+    // UI tests check the Settings window at first launch, so the setup guide stays closed.
+    var setupGuideFinished = true
+    var setupPermissionsConfirmed = false
 }
 #endif
 
@@ -78,8 +80,9 @@ private final class SessionPreferences: ConnectorPreferences, @unchecked Sendabl
     func prepareSettings(model: ConnectorAppModel) {
         guard settingsWindow == nil else { return }
         let dock = self.dock
-        let prepared = PreparedWindow(make: {
-            let controller = NSHostingController(rootView: ConnectorSettings(model: model, dock: dock))
+        let prepared = PreparedWindow(make: { [weak self] in
+            let controller = NSHostingController(rootView: ConnectorSettings(model: model, dock: dock,
+                                                                             openGuide: { self?.showSetupGuide(model: model) }))
             controller.sizingOptions = [.preferredContentSize]
             let window = NSWindow(contentViewController: controller)
             window.title = "Voxt Connector"
@@ -93,13 +96,55 @@ private final class SessionPreferences: ConnectorPreferences, @unchecked Sendabl
         dock.openSettingsWindow = { prepared.show() }
     }
 
+    /// The setup guide's window, made when shown. Closing it removes its view, which stops the checks.
+    private var guideWindow: NSWindow?
+    private var guideCloseObserver: (any NSObjectProtocol)?
+
+    func showSetupGuide(model: ConnectorAppModel) {
+        ConnectorDock.activateApp()
+        if let guideWindow { guideWindow.makeKeyAndOrderFront(nil); return }
+        let window = NSWindow(contentRect: CGRect(origin: .zero, size: ConnectorSetupGuideView.size),
+                              styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window.title = "Set Up Voxt Connector"
+        window.isReleasedWhenClosed = false
+        let dock = self.dock
+        let guide = ConnectorSetupGuide(preferences: VoxtConnectorApp.preferences)
+        let actions = ConnectorSetupActions(
+            openVoxt: {
+                guard let url = ConnectorSetupProbes.installedVoxt() else { return }
+                NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+            },
+            connect: { Task { await model.connect() } },
+            cancelConnect: { model.cancelAuthorization() },
+            addPhone: { Task { await model.beginPairing() } },
+            cancelPairing: { model.cancelPairing() },
+            openSettings: { dock.showSettings() },
+            close: { [weak window] in window?.close() })
+        window.contentViewController = NSHostingController(rootView: ConnectorSetupGuideLiveView(
+            model: model, guide: guide, probes: .live, actions: actions))
+        window.center()
+        guideCloseObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window,
+                                                                    queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.guideWindow?.contentViewController = nil
+                self.guideWindow = nil
+                if let observer = self.guideCloseObserver { NotificationCenter.default.removeObserver(observer) }
+                self.guideCloseObserver = nil
+            }
+        }
+        guideWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         dock.reopen(hasVisibleWindows: hasVisibleWindows)
     }
 }
 
-/// The status item label is the only view SwiftUI renders at launch. A Connector Voxt has
-/// approved before connects quietly; otherwise, or if that fails, Settings opens.
+/// The status item label is the only view SwiftUI renders at launch. Until the setup guide was
+/// finished once, and with no phone paired, the guide opens. A Connector Voxt has approved before
+/// connects quietly; otherwise, or if that fails, Settings opens unless the guide is open.
 private struct ConnectorMenuLabel: View {
     let model: ConnectorAppModel
     let dock: ConnectorDock
@@ -129,8 +174,11 @@ private struct ConnectorMenuLabel: View {
                     case .answerPhoneRequestDeny: model.answerPhoneRequest(false)
                     }
                 }
+                let showsGuide = ConnectorSetupFacts.showsAtLaunch(
+                    guideFinished: VoxtConnectorApp.preferences.setupGuideFinished, pairedPhones: model.pairedPhoneCount)
+                if showsGuide { delegate.showSetupGuide(model: model) }
                 if !model.opensSettingsAtLaunch, await model.connectAtLaunch() { return }
-                guard !model.isConnected else { return }
+                guard !model.isConnected, !showsGuide else { return }
                 dock.showSettings()
             }
     }
@@ -139,10 +187,12 @@ private struct ConnectorMenuLabel: View {
 private struct ConnectorMenu: View {
     let model: ConnectorAppModel
     let dock: ConnectorDock
+    let openGuide: () -> Void
 
     var body: some View {
         Text(model.statusText)
         Divider()
+        Button("Set up…", action: openGuide)
         Button("Settings…") { dock.showSettings() }
         Button("Quit Voxt Connector") {
             model.disconnect()
@@ -154,6 +204,7 @@ private struct ConnectorMenu: View {
 private struct ConnectorSettings: View {
     @Bindable var model: ConnectorAppModel
     @Bindable var dock: ConnectorDock
+    let openGuide: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -167,6 +218,9 @@ private struct ConnectorSettings: View {
                 Section("Voxt on this Mac") {
                     Text("In Voxt Settings › General › Local API, turn on “Allow other apps to dictate through Voxt”. Then click Connect and choose Allow in Voxt. To connect by hand, enter the port and Access token shown there.")
                         .foregroundStyle(.secondary)
+                    Button("Open the setup guide", action: openGuide)
+                        .buttonStyle(.link)
+                        .accessibilityIdentifier("connectorOpenGuide")
                     TextField("Port", text: $model.port)
                         .accessibilityIdentifier("connectorPort")
                     SecureField("Access token", text: $model.token)
@@ -261,70 +315,5 @@ private struct PhoneRequestSheet: View {
         }
         .padding(24)
         .frame(width: 340)
-    }
-}
-
-private struct ConnectFeedbackView: View {
-    let feedback: ConnectorAppModel.ConnectFeedback
-
-    var body: some View {
-        Group {
-            switch feedback {
-            case .idle:
-                EmptyView()
-            case .waitingForApproval:
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Click Allow in Voxt…")
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Click Allow in Voxt…")
-            case .connecting:
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Connecting…")
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Connecting…")
-            case let .connected(text):
-                Label(text, systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(text)
-            case let .failed(text):
-                Label(text, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(text)
-            }
-        }
-        .accessibilityIdentifier("connectorConnectFeedback")
-    }
-}
-
-private struct PairingQRCode: View {
-    let code: ConnectorPairingCode
-    var body: some View {
-        if let qrImage {
-            Image(nsImage: qrImage)
-                .interpolation(.none)
-                .resizable()
-                .frame(width: 220, height: 220)
-                .padding(12)
-                .background(.white)
-                .accessibilityLabel("iPhone pairing QR code")
-                .accessibilityIdentifier("connectorPairingQR")
-        } else {
-            Text("Could not draw the QR code. Cancel and try again.")
-        }
-    }
-    private var qrImage: NSImage? {
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(code.url.absoluteString.utf8)
-        filter.correctionLevel = "M"
-        guard let output = filter.outputImage,
-              let image = CIContext().createCGImage(output, from: output.extent) else { return nil }
-        return NSImage(cgImage: image, size: NSSize(width: output.extent.width, height: output.extent.height))
     }
 }

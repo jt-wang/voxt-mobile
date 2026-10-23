@@ -3,4 +3,11 @@
 // Signing.local.xcconfig (not committed) and set your own ID there; tools/build-connector.py
 // and Voxt Omni Dev's stamp read the same setting.
 VOXT_CONNECTOR_BUNDLE_ID = com.voxt.VoxtConnector
+// Where the setup guide's Add iPhone step sends people for the Voxt iPhone app. No scheme: xcconfig
+// reads // as a comment. A build with its own beta sets it in Signing.local.xcconfig.
+VOXT_IPHONE_APP_URL = github.com/sgl-project/sglang-omni/tree/main/Voxt/Mobile#set-it-up
 #include? "Signing.local.xcconfig"
+// The app's own Info.plist keys (VoxtIPhoneAppURL), merged into the generated Info.plist. Chosen by
+// target name, so the UI test bundle gets none.
+VOXT_INFOPLIST_VoxtConnector = Config/Connector-Info.plist
+INFOPLIST_FILE = $(VOXT_INFOPLIST_$(TARGET_NAME))
