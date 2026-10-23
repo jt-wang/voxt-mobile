@@ -10,14 +10,19 @@ final class AppScreensUITests: XCTestCase {
     func testFirstOpenWalksOneStepPerScreen() {
         let app = launch(paired: false)
         XCTAssertTrue(app.staticTexts["Say anything. Only your Mac hears it."].waitForExistence(timeout: 10))
+        // A first-time user learns up front that the Mac side is needed, and where to get it.
+        XCTAssertTrue(staticText(app, "You need a Mac with Apple silicon running Voxt and Voxt Connector.").exists)
+        XCTAssertTrue(app.descendants(matching: .any)["macAppsLink"].exists)
         shot("welcome", app)
         app.buttons["onboardingNext"].tap()
 
         XCTAssertTrue(title(app, is: "Connect your Mac"))
         XCTAssertTrue(app.descendants(matching: .any)["qrScanner"].exists)
         XCTAssertTrue(app.buttons["findMacButton"].exists)
-        app.buttons["noConnector"].tap()
-        XCTAssertTrue(app.staticTexts["connectorHint"].waitForExistence(timeout: 5))
+        // The setup link shows without a tap.
+        XCTAssertTrue(app.staticTexts["connectorHint"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["connectorSetupLink"].exists)
+        XCTAssertFalse(app.buttons["noConnector"].exists)
         shot("connect", app)
 
         // Pairing is faked by relaunching paired; the walkthrough resumes after Connect.

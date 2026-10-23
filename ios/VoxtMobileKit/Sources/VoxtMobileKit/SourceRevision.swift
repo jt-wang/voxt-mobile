@@ -16,12 +16,23 @@ public struct SourceRevision: Equatable, Sendable {
     /// The repository the build names in `VoxtSourceURL` (build setting `VOXT_SOURCE_URL`),
     /// upstream when it names none. xcconfig reads `//` as a comment, so the setting has no scheme.
     public static func repository(info: [String: Any]?) -> URL {
-        let upstream = URL(string: "https://github.com/sgl-project/sglang-omni")!
         let urlKey = "VoxtSourceURL"
-        guard var text = info?[urlKey] as? String, !text.isEmpty, !text.contains("$(") else { return upstream }
+        return configured(info?[urlKey], default: "https://github.com/sgl-project/sglang-omni")
+    }
+
+    /// Where the app sends people to get Voxt and Voxt Connector for the Mac: `VoxtSiteURL` (build setting
+    /// `VOXT_SITE_URL`), the setup steps upstream when the build names none. Also without a scheme.
+    public static func site(info: [String: Any]?) -> URL {
+        let siteKey = "VoxtSiteURL"
+        return configured(info?[siteKey], default: "https://github.com/sgl-project/sglang-omni/tree/main/Voxt/Mobile#set-it-up")
+    }
+
+    private static func configured(_ value: Any?, default fallback: String) -> URL {
+        let fallbackURL = URL(string: fallback)!
+        guard var text = value as? String, !text.isEmpty, !text.contains("$(") else { return fallbackURL }
         if !text.contains("://") { text = "https://" + text }
         while text.hasSuffix("/") { text.removeLast() }
-        return URL(string: text) ?? upstream
+        return URL(string: text) ?? fallbackURL
     }
 
     public var short: String { String(full.prefix(7)) }

@@ -59,6 +59,8 @@
 	<string>$(VOXT_INPUT_METHODS)</string>
 	<key>VoxtKeychainServicePrefix</key>
 	<string>$(VOXT_KEYCHAIN_SERVICE_PREFIX)</string>
+	<key>VoxtSiteURL</key>
+	<string>$(VOXT_SITE_URL)</string>
 	<key>VoxtSourceRevision</key>
 	<string>$(VOXT_SOURCE_REVISION)</string>
 	<key>VoxtSourceURL</key>

@@ -10,5 +10,7 @@ VOXT_MOBILE_ID_PREFIX = com.voxt.VoxtMobile
 VOXT_KEYCHAIN_SERVICE_PREFIX = $(VOXT_MOBILE_ID_PREFIX)
 // Where Settings › Source code and the pairing screen link to. No scheme: xcconfig reads // as a comment.
 VOXT_SOURCE_URL = github.com/sgl-project/sglang-omni
+// Where the app sends people to get Voxt and Voxt Connector for the Mac. No scheme, as above.
+VOXT_SITE_URL = github.com/sgl-project/sglang-omni/tree/main/Voxt/Mobile#set-it-up
 #include? "Signing.local.xcconfig"
 VOXT_APP_GROUP = group.$(VOXT_MOBILE_ID_PREFIX).shared

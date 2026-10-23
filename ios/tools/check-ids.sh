@@ -23,6 +23,8 @@ check "Keychain names follow the prefix" "$(sed -n 's/^VOXT_KEYCHAIN_SERVICE_PRE
 check "App/Info.plist publishes VoxtKeychainServicePrefix" "$(grep -A1 VoxtKeychainServicePrefix App/Info.plist | grep -c '\$(VOXT_KEYCHAIN_SERVICE_PREFIX)')" 1
 check "default source link is upstream" "$(sed -n 's/^VOXT_SOURCE_URL = //p' Config/Signing.shared.xcconfig)" github.com/sgl-project/sglang-omni
 check "App/Info.plist publishes VoxtSourceURL" "$(grep -A1 VoxtSourceURL App/Info.plist | grep -c '\$(VOXT_SOURCE_URL)')" 1
+check "default Mac apps link is upstream's setup steps" "$(sed -n 's/^VOXT_SITE_URL = //p' Config/Signing.shared.xcconfig)" 'github.com/sgl-project/sglang-omni/tree/main/Voxt/Mobile#set-it-up'
+check "App/Info.plist publishes VoxtSiteURL" "$(grep -A1 VoxtSiteURL App/Info.plist | grep -c '\$(VOXT_SITE_URL)')" 1
 check "app App Group" "$(setting VoxtMobile VOXT_APP_GROUP)" "group.$prefix.shared"
 check "keyboard App Group" "$(setting VoxtKeyboard VOXT_APP_GROUP)" "group.$prefix.shared"
 for f in App/VoxtMobile.entitlements Keyboard/VoxtKeyboard.entitlements; do
@@ -36,6 +38,6 @@ for f in App/Info.plist Keyboard/Info.plist; do
   check "$f version from MARKETING_VERSION" "$(grep -A1 CFBundleShortVersionString "$f" | grep -c '\$(MARKETING_VERSION)')" 1
   check "$f build from CURRENT_PROJECT_VERSION" "$(grep -A1 '<key>CFBundleVersion</key>' "$f" | grep -c '\$(CURRENT_PROJECT_VERSION)')" 1
 done
-check "iPhone version" "$(setting VoxtMobile MARKETING_VERSION)" "${VOXT_EXPECTED_VERSION:-0.1.2}"
-check "Connector version" "$(cd ../mac/VoxtConnector && xcodebuild -project VoxtConnector.xcodeproj -target VoxtConnector -configuration Release -showBuildSettings 2>/dev/null | sed -n 's/^ *MARKETING_VERSION = //p' | head -1)" "${VOXT_EXPECTED_VERSION:-0.1.2}"
+check "iPhone version" "$(setting VoxtMobile MARKETING_VERSION)" "${VOXT_EXPECTED_VERSION:-0.1.3}"
+check "Connector version" "$(cd ../mac/VoxtConnector && xcodebuild -project VoxtConnector.xcodeproj -target VoxtConnector -configuration Release -showBuildSettings 2>/dev/null | sed -n 's/^ *MARKETING_VERSION = //p' | head -1)" "${VOXT_EXPECTED_VERSION:-0.1.3}"
 exit $fail

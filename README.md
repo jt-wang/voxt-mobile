@@ -54,7 +54,7 @@ The text is inserted only if the text field still matches the one you dictated i
 
 Every app we ship is built from a public commit in this repo, and you can check which one.
 
-- **iPhone:** Settings › About › Source code shows the commit the app was built from. Open `https://github.com/jt-wang/voxt-mobile/commit/<commit>` to read that exact code (a build of your own links to the `VOXT_SOURCE_URL` in your `Signing.local.xcconfig`). On [Releases](https://github.com/jt-wang/voxt-mobile/releases), the matching release is tagged `v1.2.3+<build>`, and its notes list the same commit and iOS build number.
+- **iPhone:** Settings › About › Source code shows the commit the app was built from. Open `https://github.com/jt-wang/voxt-mobile/commit/<commit>` to read that exact code (a build of your own links to the `VOXT_SOURCE_URL` in your `Signing.local.xcconfig`). Get the Mac apps, on the first screen and the pairing screen, opens the `VOXT_SITE_URL` from the same file. On [Releases](https://github.com/jt-wang/voxt-mobile/releases), the matching release is tagged `v1.2.3+<build>`, and its notes list the same commit and iOS build number.
 - **Mac:** the release notes give the SHA-256 of `VoxtConnector.dmg`. Check that your download matches and that Apple notarized it:
 
   ```sh

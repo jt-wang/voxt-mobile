@@ -5,3 +5,5 @@ DEVELOPMENT_TEAM = ABCDE12345
 VOXT_MOBILE_ID_PREFIX = com.example.voxtmobile
 // Where Settings › About › Source code links to. Set it to the repository your build comes from.
 VOXT_SOURCE_URL = github.com/example/voxt-mobile
+// Where "Get the Mac apps" in the app links to: the page where your users get Voxt and Voxt Connector.
+VOXT_SITE_URL = example.com/voxt-mobile

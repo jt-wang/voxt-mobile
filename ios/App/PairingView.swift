@@ -5,7 +5,6 @@ import VoxtMobileKit
 /// Connect your Mac: the in-app camera for Voxt Connector's QR, or the same Wi-Fi.
 struct ConnectMacView: View {
     @Environment(AppModel.self) private var model
-    @State private var showsConnectorHint = false
     @AppStorage(VoxtL10n.preferenceKey, store: VoxtPreferences.shared) private var interfaceLanguage = ""
 
     var body: some View {
@@ -27,27 +26,17 @@ struct ConnectMacView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .voxtCard()
-            } else if showsConnectorHint {
+            } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(VoxtL10n.shared.string("Don't have Voxt Connector yet?")).font(.system(size: 19, weight: .semibold))
-                    Text(VoxtL10n.shared.string("Voxt Connector runs on your Mac next to Voxt and shows this QR. Set up both from the link below."))
+                    Text(VoxtL10n.shared.string("Voxt Connector runs on your Mac next to Voxt and shows this QR."))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("connectorHint")
-                    let source = SourceRevision.repository(info: Bundle.main.infoDictionary)
-                    Link(destination: source) {
-                        Text(verbatim: (source.host() ?? "") + source.path())
-                    }
-                    .foregroundStyle(VoxtTheme.Colors.accent)
-                    .accessibilityIdentifier("connectorSetupLink")
+                    MacAppsLink(id: "connectorSetupLink")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .voxtCard()
-            } else {
-                Button(VoxtL10n.shared.string("Don't have Voxt Connector yet?")) { withAnimation { showsConnectorHint = true } }
-                    .foregroundStyle(VoxtTheme.Colors.accent)
-                    .frame(maxWidth: .infinity)
-                    .accessibilityIdentifier("noConnector")
             }
             if let error = model.localPairingError {
                 Text(VoxtL10n.shared.string(error))

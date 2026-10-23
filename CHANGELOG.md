@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.3
+
+iPhone update: the app says on its first screen that it needs your Mac, and where to get the Mac apps.
+
+- **The Mac side is named up front.** The first screen says you need a Mac with Apple silicon running Voxt and Voxt Connector, and Get the Mac apps opens the page to download them. The pairing screen shows the same link without a tap.
+- **The link is a build setting**, `VOXT_SITE_URL` in `Signing.local.xcconfig`, like `VOXT_SOURCE_URL`. Without one it opens the setup steps in sglang-omni.
+- **The apps report 0.1.3.**
+
 ## v0.1.2
 
 Source update: Voxt quits promptly after phone dictation, and the apps show their real version.

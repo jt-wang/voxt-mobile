@@ -28,9 +28,10 @@ final class LocalizedScreensUITests: XCTestCase {
         // First open
         var app = launch(["VOXT_TEST_ONBOARDING": "welcome"], paired: false)
         wait(app.buttons["onboardingNext"]); shot("welcome", app)
+        wait(app.descendants(matching: .any)["macAppsLink"]); app.swipeUp(); shot("welcome-mac-apps", app)
         app = launch(["VOXT_TEST_ONBOARDING": "connect"], paired: false)
         wait(app.buttons["findMacButton"]); shot("connect", app)
-        tap(app.buttons["noConnector"]); shot("connect-no-connector", app)
+        wait(app.descendants(matching: .any)["connectorSetupLink"]); app.swipeUp(); shot("connect-no-connector", app)
         app = launch(["VOXT_TEST_ONBOARDING": "addKeyboard"])
         wait(app.staticTexts["addKeyboardPath"]); shot("add-keyboard", app)
         app = launch(["VOXT_TEST_ONBOARDING": "fullAccess"])

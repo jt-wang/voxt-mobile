@@ -5769,6 +5769,46 @@
         }
       }
     },
+    "Get the Mac apps" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Get the Mac apps"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obtener las apps para Mac"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac 用 App を入手"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mac용 앱 받기"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "获取 Mac 版 App"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取得 Mac 版 App"
+          }
+        }
+      }
+    },
     "Go back to your app to keep talking" : {
       "localizations" : {
         "en" : {
@@ -15211,42 +15251,42 @@
         }
       }
     },
-    "Voxt Connector runs on your Mac next to Voxt and shows this QR. Set up both from the link below." : {
+    "Voxt Connector runs on your Mac next to Voxt and shows this QR." : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Voxt Connector runs on your Mac next to Voxt and shows this QR. Set up both from the link below."
+            "value" : "Voxt Connector runs on your Mac next to Voxt and shows this QR."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Voxt Connector se ejecuta en tu Mac junto a Voxt y muestra este QR. Configura ambos desde el enlace de abajo."
+            "value" : "Voxt Connector se ejecuta en tu Mac junto a Voxt y muestra este QR."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Voxt Connector は Mac 上で Voxt と一緒に動き、この QR コードを表示します。どちらも下のリンクからセットアップできます。"
+            "value" : "Voxt Connector は Mac 上で Voxt と一緒に動き、この QR コードを表示します。"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Voxt Connector는 Mac에서 Voxt와 함께 실행되며 이 QR을 보여 줍니다. 둘 다 아래 링크에서 설정하세요."
+            "value" : "Voxt Connector는 Mac에서 Voxt와 함께 실행되며 이 QR 코드를 표시합니다."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Voxt Connector 和 Voxt 一起在你的 Mac 上运行，并显示这个二维码。两者都可以从下面的链接安装。"
+            "value" : "Voxt Connector 和 Voxt 一起在你的 Mac 上运行，并显示这个二维码。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Voxt Connector 和 Voxt 一起在你的 Mac 上執行，並顯示這個 QR 碼。兩者都可以從下面的連結安裝。"
+            "value" : "Voxt Connector 和 Voxt 一起在你的 Mac 上執行，並顯示這個 QR 碼。"
           }
         }
       }
@@ -15967,6 +16007,46 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已有 8 組風格範例，請先在設定中移除一組。"
+          }
+        }
+      }
+    },
+    "You need a Mac with Apple silicon running Voxt and Voxt Connector." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You need a Mac with Apple silicon running Voxt and Voxt Connector."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Necesitas un Mac con Apple silicon que ejecute Voxt y Voxt Connector."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voxt と Voxt Connector が動いている、Apple シリコン搭載の Mac が必要です。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voxt와 Voxt Connector가 실행 중인 Apple 실리콘 Mac이 필요합니다."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要一台搭载 Apple 芯片、运行 Voxt 和 Voxt Connector 的 Mac。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要一台搭載 Apple 晶片、執行 Voxt 和 Voxt Connector 的 Mac。"
           }
         }
       }

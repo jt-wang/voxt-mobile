@@ -118,7 +118,26 @@ private struct WelcomeStep: View {
             .font(.system(size: 17))
             .frame(maxWidth: .infinity, alignment: .leading)
             .voxtCard()
+            VStack(alignment: .leading, spacing: 8) {
+                Text(VoxtL10n.shared.string("You need a Mac with Apple silicon running Voxt and Voxt Connector."))
+                    .font(.system(size: 17))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                MacAppsLink(id: "macAppsLink")
+            }
         }
+    }
+}
+
+/// Opens the page the build names for getting Voxt and Voxt Connector (VOXT_SITE_URL).
+struct MacAppsLink: View {
+    let id: String
+
+    var body: some View {
+        Link(VoxtL10n.shared.string("Get the Mac apps"), destination: SourceRevision.site(info: Bundle.main.infoDictionary))
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(VoxtTheme.Colors.accent)
+            .accessibilityIdentifier(id)
     }
 }
 
