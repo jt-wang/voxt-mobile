@@ -354,7 +354,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(VOXT_CONNECTOR_BUNDLE_ID)";
 				PRODUCT_NAME = "Voxt Connector";
 				SDKROOT = macosx;
@@ -397,7 +397,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.1.6;
+				MARKETING_VERSION = 0.1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(VOXT_CONNECTOR_BUNDLE_ID)";
 				PRODUCT_NAME = "Voxt Connector";
 				SDKROOT = macosx;

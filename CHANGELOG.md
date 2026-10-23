@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.7
+
+Mac download update: Start Here gives the iPhone beta as a link to open on the iPhone.
+
+- **No QR code for the beta in Start Here.** Step 7 shows the TestFlight link as text, so the only code to scan is the pairing code in Voxt Connector.
+- **The apps report 0.1.7.**
+
 ## v0.1.6
 
 Mac download update: Start Here in the DMG shows every step as a moving picture of where to click.
